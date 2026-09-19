@@ -1,24 +1,63 @@
 {
   "hooks": {
     "PreToolUse": [
-      { "matcher": "Bash", "hooks": [
-        { "type": "command", "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/bash_risk_gate.py", "timeout": 10 }
-      ] }
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/bash_risk_gate.py",
+            "timeout": 10
+          }
+        ]
+      }
     ],
     "PreCompact": [
-      { "matcher": "manual|auto", "hooks": [
-        { "type": "command", "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/precompact_triage.py", "timeout": 90 }
-      ] }
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/precompact_triage.py",
+            "timeout": 90
+          }
+        ]
+      }
     ],
     "SessionStart": [
-      { "matcher": "compact", "hooks": [
-        { "type": "command", "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/sessionstart_reinject.py", "timeout": 5 }
-      ] }
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/sessionstart_reinject.py",
+            "timeout": 5
+          }
+        ]
+      }
     ],
     "SubagentStop": [
-      { "hooks": [
-        { "type": "command", "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/subagent_verify.py", "timeout": 30 }
-      ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/subagent_verify.py",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/loop_detect.py",
+            "timeout": 8
+          }
+        ]
+      }
     ]
   }
 }
