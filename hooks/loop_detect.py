@@ -15,7 +15,7 @@ consecutive strikes emit a systemMessage naming the repeated tool and the last
 error, plus additionalContext telling the model to change approach. This hook
 NEVER blocks the tool and fails open on any error or an unreachable judge.
 """
-import json, os, sys
+import json, os, sys, time, fcntl
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import jev
 
@@ -30,7 +30,33 @@ RESULT_CHARS = 400
 def state_path(sid):
     d = os.environ.get("CLAUDE_PLUGIN_DATA") or os.path.expanduser("~/.claude/jev-hooks")
     d = os.path.join(d, "loops"); os.makedirs(d, exist_ok=True)
-    return os.path.join(d, f"{sid}.json")
+    jev.prune(d)
+    return os.path.join(d, f"{jev.safe_id(sid)}.json")
+
+
+class Locked:
+    """Exclusive lock on <state>.lock for the read-modify-write. PostToolUse hooks
+    for parallel tool calls run concurrently, and this hook matches every tool, so
+    without it two invocations interleave and the six-pair window is corrupted
+    (audit 2026-09-19). Waits up to 1s, then gives up silently (fail open)."""
+    def __init__(self, p):
+        self.fh = open(p + ".lock", "a+"); self.ok = False
+    def __enter__(self):
+        deadline = time.time() + 1.0
+        while True:
+            try:
+                fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB); self.ok = True; return self
+            except OSError:
+                if time.time() > deadline:
+                    return self
+                time.sleep(0.02)
+    def __exit__(self, *a):
+        try:
+            if self.ok:
+                fcntl.flock(self.fh, fcntl.LOCK_UN)
+            self.fh.close()
+        except Exception:
+            pass
 
 
 def clip(v, n):
@@ -69,6 +95,13 @@ def main():
     if not tool:
         return
     p = state_path(sid)
+    with Locked(p) as lk:
+        if not lk.ok:
+            return                   # could not lock within 1s: skip this call, fail open
+        _judge(p, inp, tool)
+
+
+def _judge(p, inp, tool):
     try:
         st = json.load(open(p))
     except Exception:

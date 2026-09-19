@@ -24,12 +24,18 @@ SEGMENT_CHARS = 600       # a decision is short; the rest of a long message is c
 MIN_SEGMENT_CHARS = 25    # "keep going", "ok", "yes" carry nothing to preserve
 KEEP_MIN = 0.75
 KEEP_MAX = 40
+# Bound the work: only the most recent segments are judged, so the worst case is
+# RECENT_SEGMENTS / MAX_PER_BATCH = 20 calls (~5 rounds on 4 threads, ~15s at the
+# client's 14.4s worst case per call) and the hook always finishes inside its 90s
+# timeout. Audit 2026-09-19: an unbounded 50 MB transcript was ~2,700 calls and the
+# keep file was never written.
+RECENT_SEGMENTS = 400
 NARRATION_START = __import__("re").compile(r"^(Let me|Now |Next,? |Running |Checking |Looking |Reading |Starting |I'll |Merged|Pushed|Done\.)", __import__("re").I)
 
 
 def keep_dir():
     d = os.environ.get("CLAUDE_PLUGIN_DATA") or os.path.expanduser("~/.claude/jev-hooks")
-    d = os.path.join(d, "keep"); os.makedirs(d, exist_ok=True); return d
+    d = os.path.join(d, "keep"); os.makedirs(d, exist_ok=True); jev.prune(d); return d
 
 
 def judge(batch):
@@ -63,19 +69,21 @@ def judge(batch):
 
 def main():
     inp = jev.read_stdin()
-    path = inp.get("transcript_path"); sid = inp.get("session_id") or "unknown"
+    path = inp.get("transcript_path"); sid = jev.safe_id(inp.get("session_id"))
     if not path or not os.environ.get("TYPESAFE_API_KEY"):
         return
     segs = [s for s in transcript.segments(path) if s["kind"] in ("prompt", "assistant") and len(s["text"]) >= MIN_SEGMENT_CHARS
             and not (s["kind"] == "assistant" and NARRATION_START.match(s["text"]))]
+    segs = segs[-RECENT_SEGMENTS:]
     for s in segs:
         s["text"] = s["text"][:SEGMENT_CHARS]
     if not segs:
         return
-    batches = []
-    for b in transcript.batches(segs, BATCH_CHARS):
-        for i in range(0, len(b), MAX_PER_BATCH):
-            batches.append(b[i:i + MAX_PER_BATCH])
+    # Fixed-size batches: every segment is clipped to SEGMENT_CHARS, so a batch of
+    # MAX_PER_BATCH is at most 20 x 600 chars + overhead, inside BATCH_CHARS by
+    # construction, and the call count is exactly ceil(len(segs) / MAX_PER_BATCH).
+    assert MAX_PER_BATCH * (SEGMENT_CHARS + 40) <= BATCH_CHARS
+    batches = [segs[i:i + MAX_PER_BATCH] for i in range(0, len(segs), MAX_PER_BATCH)]
     with ThreadPoolExecutor(max_workers=4) as ex:
         kept = [item for res in ex.map(judge, batches) for item in res]
     if not kept:

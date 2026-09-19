@@ -2,7 +2,7 @@
 # End-to-end exercise of every hook against the stub Jev. No key, no network.
 set -u
 cd "$(dirname "$0")/.."
-PORT=${PORT:-18766}
+PORT=${PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')}
 python3 test/stub_jev.py "$PORT" & STUB=$!
 trap 'kill $STUB 2>/dev/null' EXIT
 sleep 0.4
@@ -93,5 +93,87 @@ check "stop: never blocks twice (stop_hook_active)" '[ -z "$out" ]'
 out=$(stopin "I'll do it next. [promise=yes]" 0 | TYPESAFE_BASE_URL=http://127.0.0.1:1 python3 hooks/stop_selfcheck.py)
 check "stop: Jev unreachable fails open" '[ -z "$out" ]'
 # --- end stop self-check
+
+# --- audit fixes (2026-09-19) ---------------------------------------------------------
+gate_fast() { printf '%s' "$(python3 -c 'import json,sys;print(json.dumps({"tool_name":"Bash","tool_input":{"command":sys.argv[1]}}))' "$1")" | JEV_HOOKS_DEBUG=1 TYPESAFE_BASE_URL=http://127.0.0.1:1 python3 hooks/bash_risk_gate.py 2>&1 >/dev/null | grep -c "fast-path"; }
+bypass_ok=1
+while IFS= read -r c; do [ -z "$c" ] && continue; if [ "$(gate_fast "$c")" != "0" ]; then echo "      still fast-path: $c"; bypass_ok=0; fi; done <<'EOF'
+echo x > /etc/passwd
+cat a > b
+find . -delete
+find . -exec rm -rf {} \;
+env X=1 rm -rf /tmp/x
+echo $(rm -rf x)
+echo `rm -rf x`
+awk 'BEGIN{system("rm -rf x")}'
+git branch -D master
+git remote remove origin
+sort -o /etc/hosts
+go test -exec 'rm -rf /' ./...
+ls | xargs rm
+cat a | tee /etc/hosts
+EOF
+printf 'ls\nrm -rf /tmp/x' > "$CLAUDE_PLUGIN_DATA/nl.txt"; [ "$(gate_fast "$(cat "$CLAUDE_PLUGIN_DATA/nl.txt")")" = "0" ] || { echo "      still fast-path: newline-joined rm"; bypass_ok=0; }
+check "gate: none of the audit's bypasses takes the fast path" '[ "$bypass_ok" = "1" ]'
+ro_ok=1
+while IFS= read -r c; do [ -z "$c" ] && continue; if [ "$(gate_fast "$c")" != "1" ]; then echo "      lost fast-path: $c"; ro_ok=0; fi; done <<'EOF'
+git status && go test ./...
+ls -la | head -5
+grep -rn foo . 2>&1 | wc -l
+go build ./... >/dev/null 2>&1
+git branch
+git remote -v
+kubectl get pods
+EOF
+check "gate: plain read-only commands still take the fast path" '[ "$ro_ok" = "1" ]'
+
+# verify: criteria extraction picks deliverables, not context
+crit_ok=$(python3 - <<'PYEOF'
+import sys, importlib.util
+sys.path.insert(0, "lib")
+spec = importlib.util.spec_from_file_location("sv", "hooks/subagent_verify.py"); sv = importlib.util.module_from_spec(spec); spec.loader.exec_module(sv)
+ctx = "\n".join(f"- context note number {i} about the repository layout and history" for i in range(20))
+dl = "\n".join(f"{i}. deliverable number {i}: produce artifact {i} with a test that proves it" for i in range(1, 21))
+p = "Background:\n" + ctx + "\n\nDeliverables:\n" + dl + "\n- Option A: do it in Go instead of Python if you prefer\n- Is this the right approach?\n"
+c = sv.criteria_from(p)
+ok = len(c) == 14 and all(x.startswith("deliverable number") for x in c) and c[-1].startswith("deliverable number 20") and not any("Option" in x or x.endswith("?") for x in c)
+print("1" if ok else "0")
+PYEOF
+)
+check "verify: 20 context bullets then 20 numbered deliverables -> the last 14 deliverables, no options or questions" '[ "$crit_ok" = "1" ]'
+
+# transcript: a prompt wrapped in a system-reminder is not dropped
+printf '%s\n' '{"type":"user","message":{"role":"user","content":"<system-reminder>\nhouse rules here\n</system-reminder>\nExecute node Q.\n1. write the thing and prove it works with a test"}}' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]}}' > "$CLAUDE_PLUGIN_DATA/wrapped.jsonl"
+tp=$(python3 -c "import sys;sys.path.insert(0,'lib');import transcript;print(transcript.task_prompt(sys.argv[1])[:15])" "$CLAUDE_PLUGIN_DATA/wrapped.jsonl")
+check "transcript: system-reminder wrapper is stripped, the task survives" '[ "$tp" = "Execute node Q." ]'
+
+# loop: 12 parallel invocations keep a well-formed window
+rm -f "$CLAUDE_PLUGIN_DATA/loops/par.json" "$CLAUDE_PLUGIN_DATA/loops/par.json.lock"
+pids=""; for i in $(seq 0 11); do ld "$(ev par T$i "cmd$i" out 0)" >/dev/null & pids="$pids $!"; done; wait $pids
+check "loop: 12 parallel calls leave a well-formed 6-entry window" 'python3 test/check_window.py "$CLAUDE_PLUGIN_DATA/loops/par.json"'
+
+# triage: bounded work on a huge transcript
+python3 test/gen_huge.py "$CLAUDE_PLUGIN_DATA/huge.jsonl"
+export JEV_HOOKS_LOG="$CLAUDE_PLUGIN_DATA/triage.log"; rm -f "$JEV_HOOKS_LOG"
+t0=$(date +%s); printf '%s' "{\"session_id\":\"huge\",\"transcript_path\":\"$CLAUDE_PLUGIN_DATA/huge.jsonl\",\"hook_event_name\":\"PreCompact\"}" | python3 hooks/precompact_triage.py; t1=$(date +%s)
+calls=$(wc -l < "$JEV_HOOKS_LOG"); unset JEV_HOOKS_LOG
+check "triage: a 2000-segment transcript costs at most 20 calls (made $calls) in under 30s ($((t1-t0))s)" '[ "$calls" -le 20 ] && [ $((t1-t0)) -lt 30 ]'
+
+# jev: a 429 with Retry-After is retried and succeeds
+ra=$(python3 -c "
+import sys; sys.path.insert(0,'lib'); import jev
+a=jev.ask({'x':'[stub=429once:tok1] [q=yes]'}, {'q': jev.noul('is it?')})
+print('1' if a and a['q']['noul']==1.0 else '0')")
+check "jev: a 429 with Retry-After is retried once and succeeds" '[ "$ra" = "1" ]'
+
+# session_id sanitised for file paths
+printf '%s' "{\"session_id\":\"../../evil\",\"transcript_path\":\"$PWD/test/fixtures/session.jsonl\",\"hook_event_name\":\"PreCompact\"}" | python3 hooks/precompact_triage.py
+check "paths: a traversal session_id stays inside the keep dir" '[ -f "$CLAUDE_PLUGIN_DATA/keep/evil.md" ] && [ ! -e "$CLAUDE_PLUGIN_DATA/../evil.md" ] && [ ! -e "$CLAUDE_PLUGIN_DATA/../../evil.md" ]'
+
+# prune: old files are removed
+touch -d "20 days ago" "$CLAUDE_PLUGIN_DATA/keep/old.md" "$CLAUDE_PLUGIN_DATA/loops/old.json"
+ld "$(ev pr1 Bash x out 0)" >/dev/null; printf '%s' "{\"session_id\":\"pr2\",\"transcript_path\":\"$PWD/test/fixtures/session.jsonl\"}" | python3 hooks/precompact_triage.py
+check "prune: keep and loop files older than 14 days are deleted" '[ ! -e "$CLAUDE_PLUGIN_DATA/keep/old.md" ] && [ ! -e "$CLAUDE_PLUGIN_DATA/loops/old.json" ]'
+# --- end audit fixes
 
 echo; echo "$pass passed, $fail failed"; [ "$fail" -eq 0 ]

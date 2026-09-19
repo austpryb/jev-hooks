@@ -20,15 +20,40 @@ BLOCK_BELOW = 0.35
 EVIDENCE_BELOW = 0.4
 
 
+HEADING = re.compile(r"deliverable|acceptance|definition of done|\bmust\b", re.I)
+LIST_ITEM = re.compile(r"^(\d+[.)]|[-*•])\s+\S")
+SKIP_START = re.compile(r"^(option\b|e\.g\.|for example|note\b|n\.b\.)", re.I)
+
+
 def criteria_from(prompt):
+    """The task's own deliverables, not its context. Numbered lines beat bullets;
+    a heading such as 'Deliverables' / 'acceptance' scopes the search to what
+    follows it; the LAST 14 win (deliverables come after context); options,
+    examples, notes and questions are never criteria."""
     lines = [l.strip() for l in prompt.splitlines()]
-    items = [re.sub(r"^(\d+[.)]|[-*•])\s+", "", l) for l in lines if re.match(r"^(\d+[.)]|[-*•])\s+\S", l)]
-    items = [i for i in items if len(i) > 25]
+    start = 0
+    for idx, l in enumerate(lines):
+        looks_heading = l.startswith("#") or l.startswith("**") or l.endswith(":") or len(l) < 60
+        if HEADING.search(l) and looks_heading:
+            start = idx + 1
+            break
+    scope = lines[start:] if start < len(lines) else lines
+
+    def clean(l):
+        return re.sub(r"^(\d+[.)]|[-*•])\s+", "", l).strip()
+
+    def usable(i):
+        return len(i) > 25 and not i.endswith("?") and not SKIP_START.match(i)
+
+    numbered = [clean(l) for l in scope if re.match(r"^\d+[.)]\s+\S", l)]
+    bullets = [clean(l) for l in scope if re.match(r"^[-*•]\s+\S", l)]
+    items = [i for i in (numbered or bullets) if usable(i)]
     if not items:
         items = [s.strip() for s in re.split(r"(?<=[.!?])\s+", prompt) if " must " in f" {s} " or s.lower().startswith("must ")]
+        items = [i for i in items if usable(i)]
     if not items:
         items = [prompt.strip()[:1500] or "the task as described was completed"]
-    return items[:MAX_CRITERIA]
+    return items[-MAX_CRITERIA:]
 
 
 def main():

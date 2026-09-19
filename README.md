@@ -1,7 +1,8 @@
 # jev-hooks
 
-Three Claude Code hooks backed by TypeSafe's Jev (System One): fast, calibrated
-yes/no and multiple-choice judgments at about 100 ms and a fraction of a cent.
+Five Claude Code hooks backed by TypeSafe's Jev (System One): fast, calibrated
+yes/no and multiple-choice judgments at roughly 300 ms per judgment and a fraction of a cent
+(the loop detector's no-repeat fast path is ~100 ms, which is interpreter start, not Jev).
 Jev never generates text here. It answers bounded questions so the harness can
 gate a moment it would otherwise trust itself on.
 
