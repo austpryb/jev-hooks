@@ -47,6 +47,18 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/loop_detect.py",
+            "timeout": 8
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
