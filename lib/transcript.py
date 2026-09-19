@@ -104,3 +104,28 @@ def batches(segs, max_chars):
         cur.append(s); size += n
     if cur:
         yield cur
+
+
+def task_prompt(path):
+    """What a subagent was asked to do. A forked agent's transcript starts with
+    the parent's Agent tool call, whose input.prompt is the task; its first user
+    prompt is only fork boilerplate. A fresh agent's task is its first prompt."""
+    try:
+        with open(path) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                if r.get("type") == "user":
+                    break
+                c = (r.get("message") or {}).get("content")
+                if r.get("type") == "assistant" and isinstance(c, list):
+                    for b in c:
+                        if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "Agent":
+                            p = (b.get("input") or {}).get("prompt")
+                            if p:
+                                return p
+    except Exception:
+        pass
+    return first_prompt(path)

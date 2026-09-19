@@ -39,7 +39,7 @@ def main():
     path = inp.get("transcript_path")
     if not report and path:
         report = transcript.last_assistant_text(path)
-    prompt = transcript.first_prompt(path) if path else ""
+    prompt = transcript.task_prompt(path) if path else ""
     if not report or not prompt:
         return
     crit = criteria_from(prompt)

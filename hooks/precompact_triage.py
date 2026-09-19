@@ -14,8 +14,15 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import jev, transcript
 
-BATCH_CHARS = 80_000      # well inside the 32k-token state budget
-MAX_PER_BATCH = 120       # questions = 2 x segments; keeps the request under the 64k total
+# Small batches on purpose. Measured live on a 923-segment session (2026-09-19):
+# 120 segments x 2500 chars per request kept 5 lines, mostly narration; 20
+# segments x 600 chars kept 23 and the top of the list was the real decisions.
+# Jev's own docs say accuracy falls as unrelated state grows, and it shows.
+BATCH_CHARS = 14_000
+MAX_PER_BATCH = 20
+SEGMENT_CHARS = 600       # a decision is short; the rest of a long message is context rot
+MIN_SEGMENT_CHARS = 25    # "keep going", "ok", "yes" carry nothing to preserve
+KEEP_MIN = 0.75
 KEEP_MAX = 40
 
 
@@ -43,7 +50,7 @@ def judge(batch):
     out = []
     for s in batch:
         k = a.get(f"k{s['i']}", {}).get("noul", 0); x = a.get(f"x{s['i']}", {}).get("noul", 0)
-        if k >= 0.7 and x < 0.6:
+        if k >= KEEP_MIN and x < 0.6:
             out.append((k - x, s))
     return out
 
@@ -53,7 +60,9 @@ def main():
     path = inp.get("transcript_path"); sid = inp.get("session_id") or "unknown"
     if not path or not os.environ.get("TYPESAFE_API_KEY"):
         return
-    segs = [s for s in transcript.segments(path) if s["kind"] in ("prompt", "assistant")]
+    segs = [s for s in transcript.segments(path) if s["kind"] in ("prompt", "assistant") and len(s["text"]) >= MIN_SEGMENT_CHARS]
+    for s in segs:
+        s["text"] = s["text"][:SEGMENT_CHARS]
     if not segs:
         return
     batches = []
