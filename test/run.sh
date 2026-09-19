@@ -76,5 +76,22 @@ o6=$(ld "$(ev ld4 Bash 'go test ./... # [progress=level:2]' 'ok' 0)")
 check "loop: a level-2 repeat resets strikes" '[ -z "$o6" ] && python3 -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d[\"strikes\"]==0 else 1)" "$CLAUDE_PLUGIN_DATA/loops/ld4.json"'
 o7=$(TYPESAFE_BASE_URL=http://127.0.0.1:1 ld "$(ev ld3 Bash 'x' 'FAIL' 1)"; TYPESAFE_BASE_URL=http://127.0.0.1:1 ld "$(ev ld3 Bash 'x' 'FAIL' 1)"; TYPESAFE_BASE_URL=http://127.0.0.1:1 ld "$(ev ld3 Bash 'x' 'FAIL' 1)")
 check "loop: judge unreachable fails open" '[ -z "$o7" ]'
+# --- stop self-check (hooks/stop_selfcheck.py)
+sf="$PWD/test/fixtures/stop_session.jsonl"
+stopin() { python3 -c "import json,sys;print(json.dumps({'transcript_path':sys.argv[1],'last_assistant_message':sys.argv[2],'stop_hook_active':sys.argv[3]=='1','session_id':'s'}))" "$sf" "$1" "$2"; }
+out=$(stopin "Build is green. I'll open the PR next. [promise=yes] [unanswered=no] [unverified=no]" 0 | python3 hooks/stop_selfcheck.py)
+check "stop: a promise of undone work blocks" 'echo "$out" | grep -q "\"decision\": \"block\"" && echo "$out" | grep -q "promises work not yet done"'
+check "stop: reason quotes the offending sentence" 'echo "$out" | grep -q "open the PR next"'
+out=$(stopin "The build compiles. [promise=no] [unanswered=yes] [unverified=no]" 0 | python3 hooks/stop_selfcheck.py)
+check "stop: an unanswered question blocks" 'echo "$out" | grep -q "does not answer what the user last asked"'
+out=$(stopin "All 212 integration tests pass. [promise=no] [unanswered=no] [unverified=yes]" 0 | python3 hooks/stop_selfcheck.py)
+check "stop: an unverified outcome blocks" 'echo "$out" | grep -q "tool results do not show"'
+out=$(stopin "Build is green; the integration suite was not run, only go build. [promise=no] [unanswered=no] [unverified=no]" 0 | python3 hooks/stop_selfcheck.py)
+check "stop: honest complete message passes silently" '[ -z "$out" ]'
+out=$(stopin "I'll do it next. [promise=yes] [unanswered=yes] [unverified=yes]" 1 | python3 hooks/stop_selfcheck.py)
+check "stop: never blocks twice (stop_hook_active)" '[ -z "$out" ]'
+out=$(stopin "I'll do it next. [promise=yes]" 0 | TYPESAFE_BASE_URL=http://127.0.0.1:1 python3 hooks/stop_selfcheck.py)
+check "stop: Jev unreachable fails open" '[ -z "$out" ]'
+# --- end stop self-check
 
 echo; echo "$pass passed, $fail failed"; [ "$fail" -eq 0 ]
