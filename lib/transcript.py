@@ -71,11 +71,19 @@ def segments(path):
                         yield {"i": i, "role": "tool", "kind": "tool_result", "text": _clip(txt, TOOL_RESULT_CHARS)}; i += 1
 
 
+BOILERPLATE = ("You've inherited the conversation context", "<fork-boilerplate>", "You are a worker fork")
+
+
 def first_prompt(path):
-    for s in segments(path):
-        if s["kind"] == "prompt":
-            return s["text"]
-    return ""
+    """The task a subagent was given. A forked agent's first prompt is harness
+    boilerplate, and the real task is the next one; prefer the first prompt that
+    carries a list (bullets or numbers), else the first non-boilerplate prompt."""
+    prompts = [s["text"] for s in segments(path) if s["kind"] == "prompt"]
+    prompts = [p for p in prompts if not any(b in p for b in BOILERPLATE)] or prompts
+    for p in prompts:
+        if any(l.strip()[:2] in ("- ", "* ") or l.strip()[:1].isdigit() for l in p.splitlines()):
+            return p
+    return prompts[0] if prompts else ""
 
 
 def last_assistant_text(path):
