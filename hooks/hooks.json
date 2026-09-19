@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/bash_risk_gate.py",
-            "timeout": 10
+            "timeout": 15
           }
         ]
       }
@@ -54,7 +54,7 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/loop_detect.py",
-            "timeout": 8
+            "timeout": 15
           }
         ]
       }

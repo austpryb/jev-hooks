@@ -17,18 +17,31 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import jev
 
 READ_ONLY = re.compile(
-    r"^\s*(ls|cat|head|tail|wc|pwd|echo|printf|which|type|env|date|stat|file|tree|du|df|"
-    r"grep|rg|ugrep|find|fd|sed -n|awk|sort|uniq|cut|tr|jq|yq|diff|"
-    r"git (status|log|diff|show|branch|remote|rev-parse|ls-files|blame|describe|fetch)|"
+    r"^\s*(ls|cat|head|tail|wc|pwd|echo|printf|which|type|date|stat|file|tree|du|df|"
+    r"grep|rg|ugrep|find|fd|sed -n|uniq|cut|tr|jq|yq|diff|"
+    r"git (status|log|diff|show|rev-parse|ls-files|blame|describe|fetch)|"
+    r"git branch(?!.*\s-[dDmM]\b)|"                                # listing only; -d/-D/-m/-M mutate
+    r"git remote(?!\s+(add|remove|rm|rename|set-url|prune|update)\b)|"
     r"gh (pr|issue|run|repo) (list|view|status|checks)|"
-    r"go (build|vet|test|list|version|env)|npm (test|run (build|test|check|verify|typecheck))|"
+    r"go (build|vet|list|version|env)|go test(?!.*-exec\b)|npm (test|run (build|test|check|verify|typecheck))|"
     r"docker (ps|images|logs)|kubectl (get|describe|logs)|helm (template|list|status))\b"
 )
+# Anything here means the command can write, run something else, or hide a
+# command, so the fast path is refused and Jev reads it (audit 2026-09-19: every
+# one of these bypassed the old first-word check).
+UNSAFE = re.compile(r"\$\(|`|-delete\b|-exec\b|-ok\b|system\(|\bxargs\b|\btee\b|\s-o\s")
+# Redirections that only discard or merge streams are fine; any other `>` writes a file.
+HARMLESS_REDIRECT = re.compile(r"2>&1|&>\s*/dev/null|[12]?>{1,2}\s*/dev/null")
 
 
 def is_read_only(cmd):
-    # Every pipeline stage and && / ; segment must be read-only for the fast path.
-    parts = re.split(r"\|\||&&|;|\|", cmd)
+    """True only when EVERY segment starts with a read-only program and nothing
+    in the command can write, delete, or run a hidden command."""
+    if UNSAFE.search(cmd):
+        return False
+    if ">" in HARMLESS_REDIRECT.sub("", cmd):
+        return False
+    parts = re.split(r"\|\||&&|;|\||\n", cmd)
     return all(READ_ONLY.match(p) for p in parts if p.strip())
 
 
@@ -38,7 +51,11 @@ def main():
         return
     ti = inp.get("tool_input") or {}
     cmd = ti.get("command") or ""
-    if not cmd.strip() or is_read_only(cmd):
+    if not cmd.strip():
+        return
+    if is_read_only(cmd):
+        if os.environ.get("JEV_HOOKS_DEBUG"):
+            sys.stderr.write("fast-path\n")
         return
     state = {"command": cmd, "description": ti.get("description") or "", "cwd": inp.get("cwd") or ""}
     q = {
@@ -50,9 +67,9 @@ def main():
             false="builds, tests, reads, listing, creating a new file, git commit on a branch, writing under /tmp or a scratchpad"),
         "self_kill": jev.noul(
             "Could `command` terminate the shell or agent session that is running it? Consider pkill/killall/kill with a "
-            "pattern or --force-with-lease flag broad enough to match the current shell, the test runner, or a parent process.",
-            true="pkill --force-with-lease <substring that appears in the hook's own command line>, killall bash, kill -9 -1",
-            false="kill <one specific pid>, pgrep, pkill --force-with-lease with a character-class pattern like 'db[.]test' that cannot match itself"),
+            "pattern or -f flag broad enough to match the current shell, the test runner, or a parent process.",
+            true="pkill -f <substring that appears in the hook's own command line>, killall bash, kill -9 -1",
+            false="kill <one specific pid>, pgrep, pkill -f with a character-class pattern like 'db[.]test' that cannot match itself"),
         "scope": jev.choice(
             "Does `command` affect exactly the files, processes or resources it names, or a pattern or wildcard that could "
             "match more than the `description` intends?",

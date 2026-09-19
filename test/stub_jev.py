@@ -1,7 +1,8 @@
 """A stand-in for api.typesafe.ai so hooks can be exercised without a key.
 A test steers answers with markers anywhere in the request (usually inside the
 state): [qid=yes] / [qid=no] for a noul (else 0.5), [qid=pick:<option>] for a
-choice (else the first option), [qid=level:<n>] for a score (else the middle).
+choice (else the first option), [qid=level:<n>] for a score (else the middle);
+[stub=429once:<token>] makes the first request carrying that token a 429 with Retry-After: 0.
 Run: python3 test/stub_jev.py <port>
 """
 import json, re, sys
@@ -27,6 +28,9 @@ def answer(qid, q, body_text):
             "probabilities": probs, "confidence": 0.85}
 
 
+SEEN_429 = set()
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -36,6 +40,10 @@ class H(BaseHTTPRequestHandler):
             self.send_response(401); self.end_headers(); return
         raw = self.rfile.read(int(self.headers["Content-Length"]))
         body = json.loads(raw); body_text = raw.decode()
+        m = re.search(r"\[stub=429once:([A-Za-z0-9_-]+)\]", body_text)
+        if m and m.group(1) not in SEEN_429:
+            SEEN_429.add(m.group(1))
+            self.send_response(429); self.send_header("Retry-After", "0"); self.end_headers(); return
         out = {"model": "jev-stub", "answers": {k: answer(k, q, body_text) for k, q in body["questions"].items()},
                "usage": {"input_tokens": len(json.dumps(body)) // 4, "output_tokens": 0}}
         data = json.dumps(out).encode()

@@ -5,7 +5,21 @@ where content is a string (a typed prompt) or a list of blocks of type
 text | thinking | tool_use | tool_result. Everything else (attachment, system,
 file-history-*, ...) is skipped. Thinking blocks are never read.
 """
-import json
+import json, re
+
+# Leading <tag>...</tag> blocks the harness wraps around a prompt (system-reminder,
+# fork-boilerplate, bash-input/stdout/stderr). They are stripped, not dropped: the
+# user's own text after them is the prompt.
+_LEAD_TAGS = re.compile(r"^\s*(?:<([A-Za-z][\w-]*)(?:\s[^>]*)?>.*?</\1>\s*)+", re.S)
+
+
+def prompt_text(txt):
+    txt = (txt or "").strip()
+    if txt.startswith("<"):
+        txt = _LEAD_TAGS.sub("", txt, count=1).strip()
+        if txt.startswith("<"):        # an unclosed or unknown tag: not a prompt
+            return ""
+    return txt
 
 TOOL_RESULT_CHARS = 700   # a result's first lines say what happened; the rest is bulk
 TEXT_CHARS = 2500
@@ -43,8 +57,8 @@ def segments(path):
                 continue
             c = (r.get("message") or {}).get("content")
             if isinstance(c, str):
-                txt = c.strip()
-                if txt and not txt.startswith("<") :
+                txt = prompt_text(c)
+                if txt:
                     yield {"i": i, "role": "user", "kind": "prompt", "text": _clip(txt, TEXT_CHARS)}; i += 1
                 continue
             if not isinstance(c, list):
@@ -58,8 +72,8 @@ def segments(path):
                     if txt:
                         yield {"i": i, "role": "assistant", "kind": "assistant", "text": _clip(txt, TEXT_CHARS)}; i += 1
                 elif bt == "text" and t == "user":
-                    txt = b.get("text", "").strip()
-                    if txt and not txt.startswith("<"):
+                    txt = prompt_text(b.get("text", ""))
+                    if txt:
                         yield {"i": i, "role": "user", "kind": "prompt", "text": _clip(txt, TEXT_CHARS)}; i += 1
                 elif bt == "tool_use":
                     inp = b.get("input") or {}

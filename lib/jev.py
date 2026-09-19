@@ -51,7 +51,7 @@ def ask(state, questions, retries=1):
                 return out.get("answers") or None
         except urllib.error.HTTPError as e:
             if e.code in (429, 529) and attempt < retries:
-                time.sleep(0.4 * (attempt + 1))
+                time.sleep(_retry_after(e, 0.4 * (attempt + 1)))
                 continue
             _log(len(body), None, time.time() - t0, f"http {e.code}")
             return None
@@ -59,6 +59,39 @@ def ask(state, questions, retries=1):
             _log(len(body), None, time.time() - t0, type(e).__name__)
             return None
     return None
+
+
+def _retry_after(e, default):
+    """Honour Retry-After (seconds) or retry-after-ms on a 429/529, capped at 2s so
+    the hook stays inside its harness timeout. Anything unparseable -> default."""
+    try:
+        h = e.headers.get("retry-after-ms")
+        if h:
+            return min(2.0, max(0.0, float(h) / 1000))
+        h = e.headers.get("Retry-After")
+        if h:
+            return min(2.0, max(0.0, float(h)))
+    except Exception:
+        pass
+    return default
+
+
+def safe_id(s):
+    """A session id is used as a file name; keep only [A-Za-z0-9_-]."""
+    s = "".join(ch for ch in str(s or "") if ch.isalnum() or ch in "_-")
+    return s or "unknown"
+
+
+def prune(dirpath, days=14):
+    """Best-effort: delete files older than `days` in dirpath."""
+    try:
+        cutoff = time.time() - days * 86400
+        for name in os.listdir(dirpath):
+            fp = os.path.join(dirpath, name)
+            if os.path.isfile(fp) and os.path.getmtime(fp) < cutoff:
+                os.unlink(fp)
+    except Exception:
+        pass
 
 
 def _log(nbytes, usage, secs, outcome):

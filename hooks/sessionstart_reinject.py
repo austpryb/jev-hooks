@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import jev
 
 inp = jev.read_stdin()
-sid = inp.get("session_id") or "unknown"
+sid = jev.safe_id(inp.get("session_id"))
 d = os.environ.get("CLAUDE_PLUGIN_DATA") or os.path.expanduser("~/.claude/jev-hooks")
 p = os.path.join(d, "keep", f"{sid}.md")
 try:
