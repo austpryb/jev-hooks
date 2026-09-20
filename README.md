@@ -196,6 +196,28 @@ them rather than rediscovering them:
   anywhere, and if the two ever disagree a `deny` and an `updatedInput` would be emitted for
   the same call.
 
+## Using Jev outside the hooks
+
+The hooks are one caller. `bin/jev` is the handle for everything else — a
+bounded judgment from the shell, no imports, usable by any agent or script:
+
+```bash
+bin/jev noul  "Does the report show every criterion met, with evidence?" --state-file report.md
+bin/jev score "How risky is this if it is wrong?" --level contained --level spreads --level structural --state-file diff.txt
+bin/jev ask   questions.json --state-file state.txt    # several questions, ONE call
+```
+
+Exit 3 means the judge could not be reached: no opinion, carry on. Every call
+records its decision like a hook does.
+
+**`skills/jev/SKILL.md` is the part that matters for a new agent.** It carries
+what the code cannot say: that questions in one request are independent and
+cheap so you should batch them, that code owns thresholds and ordering while
+Jev only judges, that criteria must be written for the false positives, and the
+two licence rules — never build a pass-through, never publish a comparison
+against another model. An agent handed "use Jev for X" without it will get at
+least one of those wrong.
+
 ## What the hooks decided, and tuning them with it
 
 Every hook records its own verdict next to what the call cost, to
