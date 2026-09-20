@@ -208,4 +208,10 @@ s=$(date +%s%N); pr '{"prompt":"why does the frontier release cancelled dependen
 check "routing: under 400 ms against the stub ($(( (e-s)/1000000 )) ms)" '[ $(( (e-s)/1000000 )) -lt 400 ]'
 # --- end prompt routing
 
+# --- task_prompt: a transcript whose first prompt is a compaction summary (verifier bug 2026-09-19)
+tp=$(python3 -c "import sys;sys.path.insert(0,'lib');import transcript;print(transcript.task_prompt('test/fixtures/summary_first.jsonl').splitlines()[0])")
+check "task_prompt: compaction summary first -> the last Agent call is the task" '[ "$tp" = "REAL TASK" ]'
+tp2=$(python3 -c "import sys;sys.path.insert(0,'lib');import transcript;print(transcript.task_prompt('test/fixtures/subagent.jsonl')[:14])")
+check "task_prompt: plain agent transcript still uses its first prompt" '[ "$tp2" = "Execute node X" ]'
+
 echo; echo "$pass passed, $fail failed"; [ "$fail" -eq 0 ]

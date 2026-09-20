@@ -120,10 +120,27 @@ def batches(segs, max_chars):
         yield cur
 
 
+SUMMARY_START = ("This session is being continued", "Summary:", "# Session summary")
+
+
+def _is_summary(text):
+    t = text.lstrip()
+    return any(t.startswith(m) for m in SUMMARY_START)
+
+
 def task_prompt(path):
-    """What a subagent was asked to do. A forked agent's transcript starts with
-    the parent's Agent tool call, whose input.prompt is the task; its first user
-    prompt is only fork boilerplate. A fresh agent's task is its first prompt."""
+    """What a subagent was asked to do.
+
+    A forked agent's own transcript starts with the parent's Agent tool call,
+    whose input.prompt is the task, followed by fork boilerplate. But the
+    harness has handed this hook a transcript whose first prompt was a
+    compaction summary (observed 2026-09-19: the verifier judged a fork against
+    ten criteria from a previous session). So: an Agent call before the first
+    prompt wins; otherwise the LAST Agent call anywhere in the file (the most
+    recent spawn is the likeliest task for a subagent that just stopped);
+    otherwise the first prompt that is not a compaction summary. The strategy
+    is logged so the next surprise is diagnosable."""
+    first_call, last_call, seen_user = None, None, False
     try:
         with open(path) as f:
             for line in f:
@@ -131,15 +148,40 @@ def task_prompt(path):
                     r = json.loads(line)
                 except Exception:
                     continue
-                if r.get("type") == "user":
-                    break
+                t = r.get("type")
                 c = (r.get("message") or {}).get("content")
-                if r.get("type") == "assistant" and isinstance(c, list):
+                if t == "user":
+                    seen_user = True
+                if t == "assistant" and isinstance(c, list):
                     for b in c:
                         if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "Agent":
                             p = (b.get("input") or {}).get("prompt")
                             if p:
-                                return p
+                                last_call = p
+                                if first_call is None and not seen_user:
+                                    first_call = p
     except Exception:
         pass
-    return first_prompt(path)
+    if first_call:
+        _log_strategy("agent-call-before-first-prompt"); return first_call
+    if last_call:
+        _log_strategy("last-agent-call-in-file"); return last_call
+    prompts = [s["text"] for s in segments(path) if s["kind"] == "prompt" and not _is_summary(s["text"])]
+    prompts = [p for p in prompts if not any(b in p for b in BOILERPLATE)] or prompts
+    for p in prompts:
+        if any(l.strip()[:2] in ("- ", "* ") or l.strip()[:1].isdigit() for l in p.splitlines()):
+            _log_strategy("first-listed-prompt"); return p
+    _log_strategy("first-prompt" if prompts else "none")
+    return prompts[0] if prompts else ""
+
+
+def _log_strategy(name):
+    import os, time
+    p = os.environ.get("JEV_HOOKS_LOG")
+    if not p:
+        return
+    try:
+        with open(p, "a") as f:
+            f.write(json.dumps({"t": time.time(), "task_prompt": name}) + "\n")
+    except Exception:
+        pass
