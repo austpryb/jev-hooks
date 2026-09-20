@@ -82,6 +82,7 @@ def main():
     weak = [(crit[i], a[f"c{i}"]["noul"]) for i in range(len(crit)) if a[f"c{i}"]["noul"] < BLOCK_BELOW]
     ev = a["evidence"]["noul"]
     if not weak and ev >= EVIDENCE_BELOW:
+        jev.record("subagent_verify", "pass", a, criteria=len(crit))
         return
     parts = []
     if weak:
@@ -90,6 +91,7 @@ def main():
         parts.append(f"the report asserts outcomes without verifiable evidence (p={ev:.2f})")
     reason = ("jev-hooks verification: " + " | ".join(parts) +
               ". Either do the missing work and report the evidence, or state plainly that it was not done and why. Do not restate the same report.")
+    jev.record("subagent_verify", "block", a, criteria=len(crit), note=f"{len(weak)} weak")
     print(json.dumps({"decision": "block", "reason": reason}))
 
 

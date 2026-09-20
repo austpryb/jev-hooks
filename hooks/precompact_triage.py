@@ -95,6 +95,7 @@ def main():
     for _, s in kept:
         who = "user" if s["role"] == "user" else "assistant"
         lines.append(f"- ({who}) " + s["text"].replace("\n", " ")[:400])
+    jev.record("triage", f"kept {len(kept)}", None, segments=len(segs), batches=len(batches))
     with open(os.path.join(keep_dir(), f"{sid}.md"), "w") as f:
         f.write("\n".join(lines) + "\n")
 

@@ -234,4 +234,33 @@ pin2=$(python3 -c "import json,sys;print(json.dumps({'transcript_path':'$PWD/tes
 pout2=$(printf '%s' "$pin2" | python3 hooks/stop_selfcheck.py)
 check "stop check: an unevidenced PAST result still blocks" 'echo "$pout2" | grep -q "\"decision\": \"block\""'
 
+# --- decision log: hooks record what they decided, and a dispute is labelled data
+dl=$(mktemp); rm -f "$dl"
+JEV_HOOKS_LOG="$dl" python3 -c "
+import sys,os; sys.path.insert(0,'lib'); import jev
+jev.record('stop_check','block',{'promise':{'noul':0.92}},note='promise')
+jev.record('stop_check','pass',{'promise':{'noul':0.10}})
+jev.record('bash_gate','ask',{'irreversible':{'noul':0.71},'action':{'choice':'confirm','confidence':0.83}},command='rm -rf build')
+" >/dev/null 2>&1
+dcount=$(python3 -c "
+import json,sys
+print(sum(1 for l in open(sys.argv[1]) if json.loads(l).get('kind')=='decision' and json.loads(l).get('probs')))
+" "$dl")
+check "decision log: three decisions recorded with their probabilities" '[ "$dcount" = "3" ]'
+JEV_HOOKS_LOG="$dl" python3 bin/wrong.py stop_check "was blocked on the user" >/dev/null
+dtarget=$(python3 -c "
+import json,sys
+print(next(json.loads(l)['of']['decision'] for l in open(sys.argv[1]) if json.loads(l).get('kind')=='dispute'))
+" "$dl")
+check "dispute: marks the last SPOKEN decision, not a silent pass" '[ "$dtarget" = "block" ]'
+st=$(JEV_HOOKS_LOG="$dl" python3 bin/stats.py)
+check "stats: reports the hooks, the spoke rate and the dispute" 'echo "$st" | grep -q "stop_check" && echo "$st" | grep -q "disputed 1"'
+check "stats: names the near-threshold band that needs tuning" 'echo "$st" | grep -q "near a threshold"'
+JEV_HOOKS_LOG=off python3 -c "
+import sys; sys.path.insert(0,'lib'); import jev
+assert jev.LOG is None, 'JEV_HOOKS_LOG=off must disable recording'
+" 2>/dev/null
+check "decision log: JEV_HOOKS_LOG=off records nothing" '[ $? -eq 0 ]'
+rm -f "$dl"
+
 echo; echo "$pass passed, $fail failed"; [ "$fail" -eq 0 ]

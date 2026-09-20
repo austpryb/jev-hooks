@@ -74,6 +74,34 @@ in the criteria, with live checks either way:
 A plain promise ("I'll open the PR next"), a plan in place of results, and an
 unevidenced past result ("all 41 checks pass") all still block.
 
+## What the hooks decided, and tuning them with it
+
+Every hook records its own verdict next to what the call cost, to
+`${CLAUDE_PLUGIN_DATA}/decisions.jsonl` (or `JEV_HOOKS_LOG`; `off` disables
+it). Local only, nothing leaves the machine. It is **on by default** on
+purpose: a feedback loop that needs an env var set is one that never happens,
+and without a record there is no way to measure a false positive rate — every
+threshold then moves on whoever complains loudest.
+
+```bash
+python3 bin/stats.py                       # what each hook decided, what it cost,
+                                           # and how many judgments sit near a threshold
+python3 bin/wrong.py stop_check "why"      # mark its last spoken decision wrong
+```
+
+`stats.py` prints the number that matters for tuning: how many judgments landed
+between 0.60 and 0.80, the band where a verdict flips on wording rather than
+substance. `wrong.py` appends a dispute referring to that decision and its
+probabilities, never editing history — the only labelled data a threshold can
+honestly be moved against.
+
+**Next, not built:** shipping the same decisions to `enforcer-governance` as
+OTLP records under their own scope and chain (`client: jev-hooks`), which is
+where the fleet's Claude Code telemetry and the governor's own receipts already
+land. A receipt carries verdict, policy, rule, reason, tool, session and cost —
+the same shape a hook decision has — with hash-chain integrity and dashboards
+already built. The local file stays as the no-network fallback.
+
 ## Every hook fails open
 
 No key, a timeout, a 429 or 529: the hook exits 0 with no output and the

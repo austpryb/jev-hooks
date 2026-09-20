@@ -94,10 +94,12 @@ def main():
     elif irr >= 0.5 or act["choice"] == "confirm" or (scope == "pattern" and irr >= 0.3):
         decision = "ask"; reasons.append(f"irreversible p={irr:.2f}, scope={scope}, verdict={act['choice']}")
     if not decision:
+        jev.record("bash_gate", "silent", a, command=cmd[:200])
         return
     if decision == "deny" and os.environ.get("JEV_HOOKS_GATE_MODE") == "warn":
         decision = "ask"
     hint = " Narrow the pattern (e.g. pgrep -f 'db[.]test') or name the exact target, then retry." if sk >= 0.7 or scope == "pattern" else ""
+    jev.record("bash_gate", decision, a, command=cmd[:200])
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
                                               "permissionDecisionReason": "jev-hooks: " + "; ".join(reasons) + hint}}))
 

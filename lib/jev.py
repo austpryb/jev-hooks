@@ -16,7 +16,22 @@ import json, os, sys, time, urllib.request, urllib.error
 BASE = os.environ.get("TYPESAFE_BASE_URL", "https://api.typesafe.ai").rstrip("/")
 MODEL = os.environ.get("JEV_HOOKS_MODEL", "jev-latest")
 TIMEOUT = float(os.environ.get("JEV_HOOKS_TIMEOUT", "6"))
-LOG = os.environ.get("JEV_HOOKS_LOG")  # path; append one JSON line per call when set
+# Where decisions are recorded. ON BY DEFAULT and local-only: a feedback loop
+# that needs an env var set is a feedback loop that never happens, and without
+# a record of what the hooks decided there is no way to measure a false
+# positive rate or move a threshold with evidence. Set JEV_HOOKS_LOG to choose
+# the file, or JEV_HOOKS_LOG=off to record nothing.
+def _default_log():
+    d = os.environ.get("CLAUDE_PLUGIN_DATA") or os.path.expanduser("~/.claude/jev-hooks")
+    try:
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, "decisions.jsonl")
+    except Exception:
+        return None
+
+
+_log_setting = os.environ.get("JEV_HOOKS_LOG")
+LOG = None if _log_setting == "off" else (_log_setting or _default_log())
 
 
 def noul(instructions, true=None, false=None):
@@ -94,12 +109,44 @@ def prune(dirpath, days=14):
         pass
 
 
+def record(hook, decision, answers=None, note=None, **extra):
+    """Append what a hook DECIDED, next to what the call cost.
+
+    `decision` is the hook's own verdict in its own words ("deny", "ask",
+    "silent", "block", "pass", "narrowed", "kept 8 of 41"). `answers` is the
+    raw Jev answer map, so the probabilities behind the decision are on the
+    record and a threshold can later be moved with evidence rather than by
+    annoyance. Nothing here leaves the machine.
+    """
+    if not LOG:
+        return
+    probs = {}
+    for k, v in (answers or {}).items():
+        if not isinstance(v, dict):
+            continue
+        if "noul" in v:
+            probs[k] = round(float(v["noul"]), 3)
+        elif "choice" in v:
+            probs[k] = [v["choice"], round(float(v.get("confidence") or 0), 3)]
+        elif "score" in v:
+            probs[k] = [round(float(v["score"]), 3), round(float(v.get("confidence") or 0), 3)]
+    rec = {"t": time.time(), "kind": "decision", "hook": hook, "decision": decision, "probs": probs}
+    if note:
+        rec["note"] = note[:300]
+    rec.update({k: v for k, v in extra.items() if v is not None})
+    try:
+        with open(LOG, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception:
+        pass
+
+
 def _log(nbytes, usage, secs, outcome):
     if not LOG:
         return
     try:
         with open(LOG, "a") as f:
-            f.write(json.dumps({"t": time.time(), "bytes": nbytes, "usage": usage, "secs": round(secs, 3), "outcome": outcome}) + "\n")
+            f.write(json.dumps({"t": time.time(), "kind": "call", "bytes": nbytes, "usage": usage, "secs": round(secs, 3), "outcome": outcome}) + "\n")
     except Exception:
         pass
 

@@ -96,6 +96,7 @@ def main():
         return
     failed = [(k, a[k]["noul"]) for k in ("promise", "unanswered", "unverified") if a.get(k, {}).get("noul", 0) >= BLOCK_AT]
     if not failed:
+        jev.record("stop_check", "pass", a)
         return
     names = {"promise": "the message promises work not yet done",
              "unanswered": "the message does not answer what the user last asked",
@@ -103,6 +104,7 @@ def main():
     parts = [f"{names[k]} (p={p:.2f}): \"{sentence_for(k, message)[:200]}\"" for k, p in failed]
     reason = ("jev-hooks stop check: " + " | ".join(parts) +
               ". Do the promised work now, answer the question, or show the evidence — or say plainly that it was not done and why. Do not repeat the same message.")
+    jev.record("stop_check", "block", a, note=", ".join(k for k, _ in failed))
     print(json.dumps({"decision": "block", "reason": reason}))
 
 
