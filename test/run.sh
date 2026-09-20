@@ -267,6 +267,12 @@ rm -f "$dl"
 NWD="$CLAUDE_PLUGIN_DATA/narrow"; mkdir -p "$NWD"
 BIG="$NWD/big.txt"
 python3 -c "import sys; open(sys.argv[1],'w').write(''.join('line %d\n' % i for i in range(1,1001)))" "$BIG"
+# Read's fast path skips anything under 64 KB, so the Read cases need a file over it:
+# 1000 lines still, but padded, so the offset arithmetic stays checkable.
+BIGR="$NWD/bigread.txt"
+python3 -c "import sys; open(sys.argv[1],'w').write(''.join(('line %d ' % i).ljust(120) + '\n' for i in range(1,1001)))" "$BIGR"
+SMALLR="$NWD/small.txt"
+python3 -c "import sys; open(sys.argv[1],'w').write('x\n' * 50)" "$SMALLR"
 # stdin for the hook: a one-prompt transcript carries the goal (and the stub's markers).
 nw_in() { python3 - "$1" "$2" "$3" "$NWD" <<'PYEOF'
 import json, os, sys
@@ -301,7 +307,7 @@ newcmd=$(printf '%s' "$nwout" | nw_field hookSpecificOutput.updatedInput.command
 ran=$(bash -c "$newcmd" 2>&1)
 check "narrow: a bulky read-only command is narrowed" '[ -n "$newcmd" ] && [ "$newcmd" != "cat $BIG" ]'
 check "narrow: the rewritten command really truncates (200 lines + marker)" '[ "$(printf "%s\n" "$ran" | wc -l)" -eq 201 ] && printf "%s\n" "$ran" | grep -q "^line 200$" && ! printf "%s\n" "$ran" | grep -q "^line 201$"'
-check "narrow: the rewritten command prints the truncation marker in its own output" 'printf "%s\n" "$ran" | tail -1 | grep -q "jev-hooks: first 200 lines only"'
+check "narrow: the marker names the TRUE total, which only counting the whole output can know" 'printf "%s\n" "$ran" | tail -1 | grep -q "jev-hooks: showing first 200 of 1000 lines"'
 check "narrow: a systemMessage names what was narrowed and why" 'printf "%s" "$nwout" | grep -q "systemMessage" && printf "%s" "$nwout" | grep -q "bulky=1.00, needs_all=0.00"'
 check "narrow: additionalContext says this is not the whole output" 'printf "%s" "$nwout" | nw_field hookSpecificOutput.additionalContext | grep -q "not the whole output"'
 onlycmd=$(printf '%s' "$nwout" | python3 -c "
@@ -315,7 +321,7 @@ check "narrow: updatedInput for Bash changes only the command, and appends to it
 # 2. the tail form keeps the END of the output and says so
 tailout=$(nw_in "what are the most recent lines [bulky=yes] [needs_all=no] [where=pick:tail]" Bash "$(python3 -c 'import json,sys;print(json.dumps({"command":"cat "+sys.argv[1]}))' "$BIG")" | python3 hooks/narrow_output.py)
 tailran=$(bash -c "$(printf '%s' "$tailout" | nw_field hookSpecificOutput.updatedInput.command)" 2>&1)
-check "narrow: where=tail keeps the last 200 lines and marks them" 'printf "%s\n" "$tailran" | grep -q "^line 1000$" && ! printf "%s\n" "$tailran" | grep -q "^line 800$" && printf "%s\n" "$tailran" | tail -1 | grep -q "last 200 lines only"'
+check "narrow: where=tail keeps the last 200 lines and marks them" 'printf "%s\n" "$tailran" | grep -q "^line 1000$" && ! printf "%s\n" "$tailran" | grep -q "^line 800$" && printf "%s\n" "$tailran" | tail -1 | grep -q "showing last 200 of 1000 lines"'
 
 # 3. a command whose trailing comment would swallow a `;` still rewrites correctly
 cmtout=$(nw_in "why did it restart [bulky=yes] [needs_all=no] [where=pick:head]" Bash "$(python3 -c 'import json,sys;print(json.dumps({"command":"cat "+sys.argv[1]+"   # trailing comment"}))' "$BIG")" | python3 hooks/narrow_output.py)
@@ -364,14 +370,14 @@ check "narrow: no goal in the transcript means no judgment and no call" '[ -z "$
 check "narrow: malformed stdin is silent" '[ -z "$(printf "not json" | python3 hooks/narrow_output.py)" ]'
 
 # 8. Read gets a limit, never a shell pipe
-rdout=$(nw_in "what does this config set [bulky=yes] [needs_all=no] [where=pick:head]" Read "$(python3 -c 'import json,sys;print(json.dumps({"file_path":sys.argv[1]}))' "$BIG")" | python3 hooks/narrow_output.py)
+rdout=$(nw_in "what does this config set [bulky=yes] [needs_all=no] [where=pick:head]" Read "$(python3 -c 'import json,sys;print(json.dumps({"file_path":sys.argv[1]}))' "$BIGR")" | python3 hooks/narrow_output.py)
 rdin=$(printf '%s' "$rdout" | nw_field hookSpecificOutput.updatedInput)
 check "narrow: a Read gets limit=200 and keeps its file_path" 'echo "$rdin" | python3 -c "
 import json,sys
-d=json.load(sys.stdin); sys.exit(0 if d.get(\"limit\")==200 and d.get(\"file_path\")==sys.argv[1] else 1)" "$BIG"'
+d=json.load(sys.stdin); sys.exit(0 if d.get(\"limit\")==200 and d.get(\"file_path\")==sys.argv[1] else 1)" "$BIGR"'
 check "narrow: a Read is never rewritten into a shell pipe" '! echo "$rdin" | grep -q "command" && ! echo "$rdin" | grep -q "head -"'
 check "narrow: a Read with where=head sets no offset" '! echo "$rdin" | grep -q "offset"'
-rdtail=$(nw_in "what does the end of it say [bulky=yes] [needs_all=no] [where=pick:tail]" Read "$(python3 -c 'import json,sys;print(json.dumps({"file_path":sys.argv[1]}))' "$BIG")" | python3 hooks/narrow_output.py | nw_field hookSpecificOutput.updatedInput)
+rdtail=$(nw_in "what does the end of it say [bulky=yes] [needs_all=no] [where=pick:tail]" Read "$(python3 -c 'import json,sys;print(json.dumps({"file_path":sys.argv[1]}))' "$BIGR")" | python3 hooks/narrow_output.py | nw_field hookSpecificOutput.updatedInput)
 check "narrow: a Read with where=tail offsets to the last 200 lines of 1000" 'echo "$rdtail" | python3 -c "
 import json,sys
 d=json.load(sys.stdin); sys.exit(0 if d.get(\"offset\")==801 and d.get(\"limit\")==200 else 1)"'
@@ -397,6 +403,29 @@ import json, sys
 ds = [json.loads(l) for l in open(sys.argv[1]) if l.strip() and json.loads(l).get('kind') == 'decision']
 print(','.join(d['decision'] for d in ds if d.get('hook') == 'narrow' and d.get('probs')))" "$nwlog")
 check "narrow: both the narrowed and the silent decision are recorded with probabilities" '[ "$nwrec" = "narrowed,silent" ]'
+
+# 11. the rewrite reports the command's REAL exit status, and never eats stderr
+failcmd=$(nw_in "why did the service restart [bulky=yes] [needs_all=no] [where=pick:head]" Bash '{"command":"cat /nonexistent-path-xyz"}' | python3 hooks/narrow_output.py | nw_field hookSpecificOutput.updatedInput.command)
+failout=$(bash -c "$failcmd" 2>"$NWD/fail.err"); failrc=$?
+check "narrow: a failing read-only command keeps its non-zero exit status through the rewrite" '[ -n "$failcmd" ] && [ "$failrc" -ne 0 ]'
+check "narrow: stderr is never buffered or narrowed, so the error still reaches the caller" 'grep -qi "no such file" "$NWD/fail.err" && [ -z "$failout" ]'
+okcmd=$(nw_in "why did the service restart [bulky=yes] [needs_all=no] [where=pick:head]" Bash "$(python3 -c 'import json,sys;print(json.dumps({"command":"cat "+sys.argv[1]}))' "$BIG")" | python3 hooks/narrow_output.py | nw_field hookSpecificOutput.updatedInput.command)
+bash -c "$okcmd" >/dev/null 2>&1; okrc=$?
+check "narrow: a succeeding command still reports success" '[ "$okrc" -eq 0 ]'
+shortcmd=$(nw_in "why did the service restart [bulky=yes] [needs_all=no] [where=pick:head]" Bash '{"command":"echo one-line-only"}' | python3 hooks/narrow_output.py | nw_field hookSpecificOutput.updatedInput.command)
+shortran=$(bash -c "$shortcmd" 2>&1)
+check "narrow: output shorter than the limit prints no marker, because nothing was cut" '[ "$shortran" = "one-line-only" ]'
+
+# 12. Read's free fast path: a small file cannot be bulky, so it is never judged
+: > "$nwlog"
+smallout=$(nw_in "what does this config set [bulky=yes] [needs_all=no]" Read "$(python3 -c 'import json,sys;print(json.dumps({"file_path":sys.argv[1]}))' "$SMALLR")" | JEV_HOOKS_DEBUG=1 JEV_HOOKS_LOG="$nwlog" python3 hooks/narrow_output.py 2>"$NWD/small.err")
+check "narrow: a Read under 64 KB makes no call at all" '[ -z "$smallout" ] && [ "$(nw_calls "$nwlog")" = "0" ] && grep -q "fast-path: small-file" "$NWD/small.err"'
+: > "$nwlog"
+missout=$(nw_in "what does this config set [bulky=yes] [needs_all=no]" Read '{"file_path":"/nope/not-a-file.txt"}' | JEV_HOOKS_DEBUG=1 JEV_HOOKS_LOG="$nwlog" python3 hooks/narrow_output.py 2>"$NWD/miss.err")
+check "narrow: an unreadable Read path fails open with no call" '[ -z "$missout" ] && [ "$(nw_calls "$nwlog")" = "0" ] && grep -q "fast-path: unreadable-path" "$NWD/miss.err"'
+: > "$nwlog"
+bigrout=$(nw_in "what does this config set [bulky=yes] [needs_all=no] [where=pick:head]" Read "$(python3 -c 'import json,sys;print(json.dumps({"file_path":sys.argv[1]}))' "$BIGR")" | JEV_HOOKS_LOG="$nwlog" python3 hooks/narrow_output.py)
+check "narrow: a Read over 64 KB is still judged and narrowed" '[ -n "$bigrout" ] && [ "$(nw_calls "$nwlog")" = "1" ]'
 # --- end narrow output
 
 echo; echo "$pass passed, $fail failed"; [ "$fail" -eq 0 ]

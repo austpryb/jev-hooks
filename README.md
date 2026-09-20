@@ -87,28 +87,51 @@ last user prompt:
 
 | Command | Goal | bulky | needs_all | where | Decision | Latency |
 |---|---|---|---|---|---|---|
-| `cat /var/log/syslog` | "why did the service restart" | 0.96 | 0.15 | tail (0.88) | **narrowed** to `\| tail -200` | 405 ms |
-| `wc -l big.csv` | "how many rows" | — | — | — | fast path, **no call** | 132 ms |
-| `grep -rn TODO .` | "count the TODOs" | 0.92 | 0.92 | tail (0.54) | silent — left alone | 450 ms |
+| `cat /var/log/syslog` | "why did the service restart" | 0.96 | 0.15 | tail (0.87) | **narrowed** to the last 200 lines | 437 ms |
+| `wc -l big.csv` | "how many rows" | — | — | — | fast path, **no call** | 135 ms |
+| `grep -rn TODO .` | "count the TODOs" | 0.91 | 0.91 | tail (0.64) | silent — left alone | 499 ms |
 
 The middle row costs nothing at all: `wc` already bounds its own output, so there is
 nothing to decide. The third is the one the rails exist for — the output really is bulky
-(0.92), but counting every match needs all of it, so narrowing would produce a confidently
-wrong number. `cat big.csv` with the same "how many rows" goal scores bulky 0.97 and
+(0.91), but counting every match needs all of it, so narrowing would produce a confidently
+wrong number. `cat big.csv` with the same "how many rows" goal scores bulky 0.96 and
 needs_all 0.83 and is likewise left alone. Each call costs about 680 input tokens.
 
 The narrowed command is rewritten so the truncation is visible in its own output:
 
 ```bash
-{ { cat /var/log/syslog
-} | tail -200
-echo '[jev-hooks: last 200 lines only — the rest of this output was not shown. Re-run the command without the | tail -200 to see all of it.]'
-}
+_jh_f=$(mktemp)
+{ cat /var/log/syslog
+} > "$_jh_f"
+_jh_rc=$?
+tail -n 200 "$_jh_f"
+_jh_n=$(wc -l < "$_jh_f")
+[ "$_jh_n" -gt 200 ] && echo "[jev-hooks: showing last 200 of $_jh_n lines; re-run without narrowing for all]"
+rm -f "$_jh_f"
+(exit $_jh_rc)
 ```
 
-The newlines are load-bearing: a command ending in a trailing `# comment` would swallow a
-closing `;` and the rewrite would not parse. A `systemMessage` names what was narrowed and
-why on every narrowing, so it is visible and can be re-run unnarrowed.
+It is not a pipe to `head`, and the reason matters. A pipe makes the tool's exit status
+that of the *last* command in it, so a failing read-only command would report success — a
+worse lie than the bulk it saves. Buffering stdout instead lets `$?` be captured
+immediately and replayed by `(exit $_jh_rc)` in a subshell, which sets the status without
+exiting the harness's persistent shell. Counting the whole output is also what lets the
+marker state the **true total** ("showing last 200 of 4812 lines"), which a pipe can never
+know, and it means the marker appears only when something was really cut. **stderr is
+never redirected**: errors are short, important, and must not be narrowed or delayed
+behind a buffer.
+
+The tradeoff accepted: the producer now runs to completion rather than being killed early
+by SIGPIPE. That is right here — the goal is keeping tokens out of context, not saving the
+command work — and a read-only command that produces gigabytes is pathological.
+
+Two details are load-bearing. The group closes on a **newline**, not `;`, because a command
+ending in a trailing `# comment` would swallow a `;` and the rewrite would not parse. And
+the shell variables are `_jh_`-prefixed because the harness reuses one shell across calls,
+where a bare `f`, `rc` or `n` would clobber the caller's own.
+
+A `systemMessage` names what was narrowed and why on every narrowing, so it is visible and
+can be re-run unnarrowed.
 
 ### The rails, which are the point
 
@@ -123,6 +146,29 @@ why on every narrowing, so it is visible and can be re-run unnarrowed.
 5. **Fails open** on no key, timeout, 429/529, malformed stdin. And with no goal in the
    transcript it does nothing at all: there is nothing for "bulky" to be relative to, and a
    judge asked to guess one would narrow on the command's looks alone.
+6. **A small file is never judged.** Almost no `Read` arrives with a `limit`, so without a
+   free fast path the most common call in a session would pay ~300 ms and ~680 tokens every
+   time. Anything under 64 KB is skipped outright: a small file cannot be bulky, and there
+   is nothing to decide.
+
+### What this cannot know
+
+Three limits are real, are not fixed, and are written down here so the next person inherits
+them rather than rediscovering them:
+
+- **`is_read_only` now decides more than it used to.** In `bash_risk_gate` a mistake in that
+  regex means the gate stays quiet and the normal permission flow decides; here it means a
+  command gets rewritten. The blast radius is bounded — the rewrite only ever appends a
+  limiter, so a misjudged command is not made destructive — but one regex is now load-bearing
+  for two hooks that different people will edit.
+- **The goal can be stale.** `goal` is the last thing the user typed, which in a long agentic
+  stretch may be twenty tool calls and three subtasks old. Narrowing against a stale goal cuts
+  the wrong end, and nothing at runtime can tell "old goal" from "current goal".
+- **Two PreToolUse hooks now run on Bash.** They cannot both speak today, because anything
+  `narrow_output` would rewrite is read-only and read-only takes `bash_risk_gate`'s silent
+  fast path. That non-overlap is a property of the shared predicate, not something enforced
+  anywhere, and if the two ever disagree a `deny` and an `updatedInput` would be emitted for
+  the same call.
 
 ## What the hooks decided, and tuning them with it
 
@@ -174,7 +220,7 @@ their terms before enabling this on a repository whose prompts are sensitive.
 ## Test
 
 ```bash
-bash test/run.sh      # 88 checks against a local stub; no key, no network
+bash test/run.sh      # 95 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),

@@ -48,6 +48,8 @@ GOAL_CHARS = 1500
 # How many lines are worth keeping when the judge says the output is bulky.
 # Small on purpose: the point is an answer, not a sample of the file.
 N_LINES = {"Bash": 200, "Read": 200, "Grep": 100}
+# Under this, a file is not bulky by definition and never reaches Jev.
+SMALL_FILE_BYTES = 64 * 1024
 
 # The command already bounds its own output, so there is nothing to decide and
 # no call to pay for. `-n`/`-m` also catch `sed -n`, `grep -m`, `docker logs -n`.
@@ -108,7 +110,17 @@ def narrowable(inp):
             return None, "no-path"
         if ti.get("limit"):
             return None, "already-limited"
-        return {"command_or_path": f"Read the file {p}", "description": ""}, None
+        # Almost no Read arrives with a limit, so without this the most common
+        # call in a session pays ~300 ms and ~680 tokens every time. A file
+        # under the threshold cannot be bulky, so there is nothing to judge.
+        # A missing or unreadable path skips too: fail open, let Read report it.
+        try:
+            size = os.path.getsize(p)
+        except Exception:
+            return None, "unreadable-path"
+        if size < SMALL_FILE_BYTES:
+            return None, "small-file"
+        return {"command_or_path": f"Read the file {p} ({size // 1024} KB)", "description": ""}, None
     if tool == "Grep":
         pat = ti.get("pattern")
         if not pat:
@@ -148,19 +160,43 @@ def questions():
 
 
 def narrow_bash(cmd, n, where):
-    """Append a limiter and make the truncation visible in the command's own
-    output. Newlines rather than `;` close the groups, because a command ending
-    in a trailing `# comment` would otherwise swallow the closing brace."""
+    """Buffer stdout, show one end of it, then report the command's REAL status.
+
+    Not `| head -n`. A pipe makes the tool's exit status that of the last
+    command in it, so a failing read-only command would report success — a
+    worse lie than the bulk it saves. So: stdout goes to a temp file, `$?` is
+    captured immediately, one end is printed, and `(exit $rc)` in a subshell
+    sets the status without exiting the caller's persistent shell. stderr is
+    never redirected: errors are short, important, and must not be narrowed or
+    delayed behind a buffer.
+
+    Counting the whole output is what lets the marker state the TRUE total
+    ("first 200 of 4812 lines"), which a pipe could never know, and it means
+    the marker prints only when something was actually cut.
+
+    The tradeoff: the producer now runs to completion instead of being killed
+    early by SIGPIPE. That is the right trade here — the goal is keeping tokens
+    out of context, not saving the command work — and a read-only command that
+    produces gigabytes is pathological.
+
+    Shell variables are `_jh_`-prefixed because the harness reuses one shell
+    across calls and a bare `f`, `rc` or `n` would clobber the caller's own.
+    The group closes on a NEWLINE, not `;`: a command ending in a trailing
+    `# comment` would swallow a `;` and the rewrite would not parse.
+    """
     end = "tail" if where == "tail" else "head"
     word = "last" if end == "tail" else "first"
-    marker = (f"[jev-hooks: {word} {n} lines only — the rest of this output was not shown. "
-              f"Re-run the command without the | {end} -{n} to see all of it.]")
-    return ("{ { " + cmd.rstrip() + "\n} | " + f"{end} -{n}" + "\n"
-            + "echo " + shquote(marker) + "\n}")
-
-
-def shquote(s):
-    return "'" + s.replace("'", "'\\''") + "'"
+    marker = (f"[jev-hooks: showing {word} {n} of $_jh_n lines; "
+              f"re-run without narrowing for all]")
+    return ('_jh_f=$(mktemp)\n'
+            '{ ' + cmd.rstrip() + '\n'
+            '} > "$_jh_f"\n'
+            '_jh_rc=$?\n'
+            f'{end} -n {n} "$_jh_f"\n'
+            '_jh_n=$(wc -l < "$_jh_f")\n'
+            f'[ "$_jh_n" -gt {n} ] && echo "{marker}"\n'
+            'rm -f "$_jh_f"\n'
+            '(exit $_jh_rc)')
 
 
 def file_lines(path):
