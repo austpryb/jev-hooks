@@ -1,6 +1,6 @@
 # jev-hooks
 
-Seven Claude Code hooks backed by TypeSafe's Jev (System One): fast, calibrated
+Eight Claude Code hooks backed by TypeSafe's Jev (System One): fast, calibrated
 yes/no and multiple-choice judgments at roughly 300 ms per judgment and a fraction of a cent
 (the loop detector's no-repeat fast path is ~100 ms, which is interpreter start, not Jev).
 Jev never generates text here. It answers bounded questions so the harness can
@@ -14,6 +14,7 @@ gate a moment it would otherwise trust itself on.
 | `loop_detect.py` | PostToolUse (any tool) | Keeps the last six tool calls per session. Only when the last three tool names repeat does it ask one score: same failure again, unclear, or clear progress. Three no-progress scores in a row post a system message naming the repeated tool and the last error, and tell the model to change approach. Never blocks a tool. |
 | `stop_selfcheck.py` | Stop | Reads only the final message, the last user prompt and the tail of recent tool results. Three yes/no questions in one call: does it promise work not yet done, does it fail to answer what the user last asked, does it state an outcome the tool results do not show. Any answer at or above 0.7 sends the session back once with the check named and the offending sentence quoted. |
 | `prompt_routing.py` | UserPromptSubmit | Reads the prompt alone, never the transcript. One choice says what kind of message it is (question, change request, thinking aloud, approval, other) and, when the machine lists skills, a second choice names the relevant one. Prints one line of context only when confident: a question is answered not acted on, an approval means proceed, thinking aloud gets a response not work. Change requests get nothing. Skips prompts under 12 characters, slash commands and pasted tool blocks. |
+| `edit_risk_gate.py` | PreToolUse (Edit, Write, NotebookEdit, MultiEdit) | The Bash gate reads a command; this reads a file change, and git settles most of it without a call. A clean tracked file is skipped — `git checkout --` restores it, however large the edit. A whole-file Write over uncommitted changes is asked about outright: the delta is provably gone, and a live run scored that same input 0.54 then 0.46, so it is decided as the fact it is rather than on a coin flip. Any other edit to a tracked file is skipped too. Jev is left one question, about the files no commit holds — ignored, untracked, or in no repo at all: precious, or regenerable? **Nothing from inside the file is sent** — path, git verdict and byte counts only, because the ignored file most likely to reach this point is the one most likely to hold a secret. |
 | `narrow_output.py` | PreToolUse (Bash, Read, Grep) | Judges output **before** it enters context. A command that already limits itself, one with no command or path, and anything not provably read-only never reach Jev. Otherwise one call over the command and the last user prompt asks: is this far more output than the goal needs, does the goal need all of it, and which end carries the answer. Only when bulky ≥ 0.7 and needs_all < 0.3 does it append `| head -200` / `| tail -200` (Read gets `limit`, Grep `head_limit`). It only ever appends a limiter — never a path, a pattern or a flag's value — and the rewrite prints a marker saying what was cut. |
 
 ## Install
@@ -27,6 +28,31 @@ Optional: `JEV_HOOKS_MODEL` (default `jev-latest`; pin a versioned id if you tun
 thresholds), `JEV_HOOKS_TIMEOUT` seconds (default 6), `JEV_HOOKS_GATE_MODE=warn`
 (never deny, only ask), `JEV_HOOKS_LOG=/path` (one JSON line per call with token
 usage and latency).
+
+## Edit gate, live
+
+Run 2026-09-19 against `jev-latest`, three times per case in a scratch repo, to see
+whether any decision flapped:
+
+| The write | git state | Decision | Cost |
+|---|---|---|---|
+| `Write` 12 B over a 1.5 KB `main.tf` | uncommitted changes | **ask** ×3 | no call, ~145 ms |
+| `Edit` one byte in the same file | uncommitted changes | silent ×3 | no call, ~125 ms |
+| `Edit` in it once committed | clean | silent ×3 | no call, ~130 ms |
+| `Write` over a git-ignored `.env` | ignored | **ask** ×3 (p=0.66-0.69) | ~570 ms |
+| `Write` over a git-ignored `pnpm.lock` | ignored | silent ×3 | ~515 ms |
+| `Write` over an untracked `notes.md` | untracked | **ask** ×3 (p=0.61-0.62) | ~525 ms |
+
+The two ignored files are the point. Both are invisible to git, both are being
+truncated wholesale, and the only thing separating them is whether the content
+can be got back — `.env` cannot, `pnpm.lock` is one `install` away. Jev splits
+them on the path alone, without seeing a byte of either.
+
+The first two rows are the other half of the point: they are facts, so they never
+reach Jev, and the fast path costs a single `git status`. An earlier version put
+both to Jev and got 0.54 on one run and 0.46 on the next for identical input —
+correct uncertainty, since a commit really does hold most of a modified file, but
+useless to hang a threshold on. What git can prove, git decides.
 
 ## Stop self-check, live
 
@@ -213,14 +239,18 @@ prompts and assistant prose, clipped, never tool output or thinking. Verify
 sends the subagent's task and last message. The stop check sends the last user
 prompt, the final message and up to 6k chars of recent tool results. The narrowing
 gate sends the command or path, its description and the last user prompt as the goal,
-clipped to 1500 chars — never any tool output. TypeSafe stores inputs by
+clipped to 1500 chars — never any tool output. The edit gate sends the least of
+any of them: a path, git's one-word verdict on it and three byte counts, and
+never a byte from inside the file — the ignored file most likely to reach it is
+the one most likely to hold a secret, so shipping a preview to decide whether it
+is precious would give away the thing being protected. TypeSafe stores inputs by
 default with no stated retention period (US-hosted, not used for training); read
 their terms before enabling this on a repository whose prompts are sensitive.
 
 ## Test
 
 ```bash
-bash test/run.sh      # 95 checks against a local stub; no key, no network
+bash test/run.sh      # 111 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),

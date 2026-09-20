@@ -3,6 +3,9 @@
 set -u
 cd "$(dirname "$0")/.."
 PORT=${PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')}
+# Every raw request, so a test can assert what a hook does NOT send. Must be
+# exported before the stub starts: the stub reads it from its own environment.
+export JEV_STUB_RECORD="$(mktemp)"
 python3 test/stub_jev.py "$PORT" & STUB=$!
 trap 'kill $STUB 2>/dev/null' EXIT
 sleep 0.4
@@ -437,5 +440,60 @@ check "narrow: an unreadable Read path fails open with no call" '[ -z "$missout"
 bigrout=$(nw_in "what does this config set [bulky=yes] [needs_all=no] [where=pick:head]" Read "$(python3 -c 'import json,sys;print(json.dumps({"file_path":sys.argv[1]}))' "$BIGR")" | JEV_HOOKS_LOG="$nwlog" python3 hooks/narrow_output.py)
 check "narrow: a Read over 64 KB is still judged and narrowed" '[ -n "$bigrout" ] && [ "$(nw_calls "$nwlog")" = "1" ]'
 # --- end narrow output
+
+# --- edit risk gate (hooks/edit_risk_gate.py) ---------------------------------
+# NOT under $CLAUDE_PLUGIN_DATA: mktemp puts that in /tmp, which the gate
+# correctly treats as scratch and skips, so every case here would fast-path.
+EG="$(mktemp -d "$PWD/.egtest.XXXXXX")"
+trap 'kill $STUB 2>/dev/null; rm -rf "$EG"' EXIT
+git -C "$EG" init -q; git -C "$EG" config user.email t@t; git -C "$EG" config user.name t
+SECRET="s3cret-never-leaves-the-machine"
+seq 200 > "$EG/tracked.tf"; printf '.env\n' > "$EG/.gitignore"; printf 'TOKEN=%s\n' "$SECRET" > "$EG/.env"
+printf '*.lock\n' >> "$EG/.gitignore"; seq 500 > "$EG/regen.lock"; seq 50 > "$EG/untracked.tf"
+git -C "$EG" add tracked.tf .gitignore >/dev/null; git -C "$EG" commit -qm init
+eg() { printf '%s' "$1" | JEV_HOOKS_DEBUG=1 python3 hooks/edit_risk_gate.py 2>"$CLAUDE_PLUGIN_DATA/eg.err"; }
+egin() { python3 -c 'import json,sys;print(json.dumps({"tool_name":sys.argv[1],"tool_input":json.loads(sys.argv[2]),"cwd":sys.argv[3]}))' "$@"; }
+STEER='[unrecoverable=yes] [proportionate=pick:wholesale] [action=pick:confirm]'
+
+out=$(eg "$(egin Edit "{\"file_path\":\"$EG/tracked.tf\",\"old_string\":\"1\",\"new_string\":\"x\"}" "$STEER")")
+check "edit gate: a clean tracked file never reaches Jev" '[ -z "$out" ] && grep -q "fast-path: git clean" "$CLAUDE_PLUGIN_DATA/eg.err"'
+out=$(eg "$(egin Write "{\"file_path\":\"$EG/brand-new.tf\",\"content\":\"x\"}" "$STEER")")
+check "edit gate: creating a new file never reaches Jev" '[ -z "$out" ] && grep -q "fast-path: new file" "$CLAUDE_PLUGIN_DATA/eg.err"'
+out=$(eg "$(egin Write "{\"file_path\":\"/tmp/eg-scratch.txt\",\"content\":\"x\"}" "$STEER")")
+check "edit gate: a scratch path never reaches Jev" '[ -z "$out" ] && grep -q "fast-path: scratch" "$CLAUDE_PLUGIN_DATA/eg.err"'
+out=$(eg "$(egin Read "{\"file_path\":\"$EG/tracked.tf\"}" "$STEER")")
+check "edit gate: a tool it does not gate is ignored" '[ -z "$out" ]'
+
+echo "uncommitted" >> "$EG/tracked.tf"
+eglog="$CLAUDE_PLUGIN_DATA/eg.log"; : > "$eglog"
+out=$(printf '%s' "$(egin Write "{\"file_path\":\"$EG/tracked.tf\",\"content\":\"tiny\"}" "$STEER")" | JEV_HOOKS_LOG="$eglog" python3 hooks/edit_risk_gate.py)
+check "edit gate: a whole-file write over uncommitted changes asks" 'echo "$out" | grep -q "\"permissionDecision\": \"ask\"" && echo "$out" | grep -q "uncommitted changes"'
+check "edit gate: that case is a fact and costs no Jev call" '[ "$(grep -c "\"kind\": \"call\"" "$eglog")" = "0" ]'
+check "edit gate: it names the file and says to commit or stash" 'echo "$out" | grep -q "tracked.tf" && echo "$out" | grep -q "Commit or stash it first"'
+: > "$eglog"
+out=$(printf '%s' "$(egin Edit "{\"file_path\":\"$EG/tracked.tf\",\"old_string\":\"7\",\"new_string\":\"x\"}" "$STEER")" | JEV_HOOKS_DEBUG=1 JEV_HOOKS_LOG="$eglog" python3 hooks/edit_risk_gate.py 2>"$CLAUDE_PLUGIN_DATA/eg.err")
+check "edit gate: a targeted Edit on a dirty file is silent and costs no call" '[ -z "$out" ] && [ "$(grep -c "\"kind\": \"call\"" "$eglog")" = "0" ] && grep -q "git holds the base" "$CLAUDE_PLUGIN_DATA/eg.err"'
+
+: > "$JEV_STUB_RECORD"
+out=$(eg "$(egin Write "{\"file_path\":\"$EG/.env\",\"content\":\"TOKEN=new\"}" "$STEER")")
+check "edit gate: a git-ignored file is judged, not waved through" 'echo "$out" | grep -q "\"permissionDecision\": \"ask\"" && echo "$out" | grep -q "is ignored"'
+check "edit gate: the file's contents are never sent to Jev" '[ -s "$JEV_STUB_RECORD" ] && ! grep -q "$SECRET" "$JEV_STUB_RECORD"'
+
+BLOCKSTEER='[unrecoverable=yes] [proportionate=pick:wholesale] [action=pick:block]'
+out=$(eg "$(egin Write "{\"file_path\":\"$EG/untracked.tf\",\"content\":\"x\"}" "$BLOCKSTEER")")
+check "edit gate: destroying unversioned work is denied" 'echo "$out" | grep -q "\"permissionDecision\": \"deny\""'
+out=$(printf '%s' "$(egin Write "{\"file_path\":\"$EG/untracked.tf\",\"content\":\"x\"}" "$BLOCKSTEER")" | JEV_HOOKS_GATE_MODE=warn python3 hooks/edit_risk_gate.py)
+check "edit gate: warn mode downgrades deny to ask" 'echo "$out" | grep -q "\"permissionDecision\": \"ask\""'
+REGEN='[unrecoverable=no] [proportionate=pick:wholesale] [action=pick:confirm]'
+out=$(eg "$(egin Write "{\"file_path\":\"$EG/regen.lock\",\"content\":\"{}\"}" "$REGEN")")
+check "edit gate: a recoverable file stays silent even on a confirm verdict" '[ -z "$out" ]'
+out=$(eg "$(egin Write "{\"file_path\":\"$EG/.env\",\"content\":\"x\"}" "$STEER")")
+check "edit gate: an ignored file is never told to commit itself" 'echo "$out" | grep -q "copy it aside" && ! echo "$out" | grep -q "Commit or stash"'
+SAFESTEER='[unrecoverable=no] [proportionate=pick:targeted] [action=pick:allow]'
+out=$(eg "$(egin Edit "{\"file_path\":\"$EG/tracked.tf\",\"old_string\":\"1\",\"new_string\":\"2\"}" "$SAFESTEER")")
+check "edit gate: a recoverable targeted edit passes silently" '[ -z "$out" ]'
+out=$(printf '%s' "$(egin Write "{\"file_path\":\"$EG/untracked.tf\",\"content\":\"x\"}" "$STEER")" | TYPESAFE_BASE_URL=http://127.0.0.1:1 python3 hooks/edit_risk_gate.py)
+check "edit gate: Jev unreachable fails open" '[ -z "$out" ]'
+# --- end edit risk gate
 
 echo; echo "$pass passed, $fail failed"; [ "$fail" -eq 0 ]

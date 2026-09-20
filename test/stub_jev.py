@@ -3,9 +3,11 @@ A test steers answers with markers anywhere in the request (usually inside the
 state): [qid=yes] / [qid=no] for a noul (else 0.5), [qid=pick:<option>] for a
 choice (else the first option), [qid=level:<n>] for a score (else the middle);
 [stub=429once:<token>] makes the first request carrying that token a 429 with Retry-After: 0.
+JEV_STUB_RECORD=<path> appends every raw request body there, so a test can assert
+what a hook does not send.
 Run: python3 test/stub_jev.py <port>
 """
-import json, re, sys
+import json, os, re, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
@@ -40,6 +42,9 @@ class H(BaseHTTPRequestHandler):
             self.send_response(401); self.end_headers(); return
         raw = self.rfile.read(int(self.headers["Content-Length"]))
         body = json.loads(raw); body_text = raw.decode()
+        rec = os.environ.get("JEV_STUB_RECORD")   # a test asserting what is NOT sent needs the raw request
+        if rec:
+            open(rec, "a").write(body_text + "\n")
         m = re.search(r"\[stub=429once:([A-Za-z0-9_-]+)\]", body_text)
         if m and m.group(1) not in SEEN_429:
             SEEN_429.add(m.group(1))
