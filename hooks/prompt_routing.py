@@ -101,6 +101,7 @@ def main():
         parts.append(f"Relevant skill: {s['choice']}.")
     debug(f"ms={int((time.time() - t0) * 1000)} kind={k.get('choice')}:{k.get('confidence')} skill={s.get('choice')}:{s.get('confidence')}")
     if parts:
+        jev.record("prompt_routing", "hint", a, note=" ".join(parts)[:160])
         print(" ".join(parts))
 
 

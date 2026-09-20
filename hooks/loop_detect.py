@@ -133,7 +133,9 @@ def _judge(p, inp, tool):
         st["strikes"] = 0            # say it once, then start counting again
     _save(p, st)
     if not fire:
+        jev.record("loop_detect", "counting", a, tool=tool, note=f"strikes={st.get('strikes', 0)}")
         return
+    jev.record("loop_detect", "nudge", a, tool=tool)
     err = next((x["result"] for x in reversed(last) if x["error"]), last[-1]["result"])
     msg = f"jev-hooks: the last three {tool} calls made no progress ({clip(err, 160)})"
     print(json.dumps({
