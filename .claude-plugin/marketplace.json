@@ -5,7 +5,8 @@
     {
       "name": "jev-hooks",
       "source": "./",
-      "description": "Six Claude Code hooks backed by TypeSafe's Jev: a Bash risk gate, compaction triage that preserves decisions, verification of subagent reports, a Stop self-check, loop detection and a prompt-kind hint. Your own TYPESAFE_API_KEY; every hook fails open."
+      "version": "0.6.0",
+      "description": "Seven Claude Code hooks backed by TypeSafe's Jev: a Bash risk gate, compaction triage that preserves decisions, verification of subagent reports, a Stop self-check, loop detection, a prompt-kind hint and a gate that narrows bulky tool output before it enters context. Your own TYPESAFE_API_KEY; every hook fails open."
     }
   ]
 }
