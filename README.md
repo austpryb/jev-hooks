@@ -277,6 +277,14 @@ never be the reason a coding session stalls. The verify and stop hooks each bloc
 once (`stop_hook_active`), and the gate never turns an allow into a
 deny for read-only commands, which it short-circuits before any network call.
 
+## Before making this repository public
+
+See [LICENSING.md](LICENSING.md). It is a DRAFT and no lawyer has read it. The
+open question is whether `bin/jev`, which forwards an arbitrary question to
+Jev, is a client (each user brings their own key) or a standalone service (which
+TypeSafe's agreement forbids offering). The hooks themselves are bounded
+judgments and are not in question. A person decides this, not an agent.
+
 ## What leaves your machine
 
 The gate sends the command, its description and the cwd. Triage sends user
@@ -295,7 +303,7 @@ their terms before enabling this on a repository whose prompts are sensitive.
 ## Test
 
 ```bash
-bash test/run.sh      # 111 checks against a local stub; no key, no network
+bash test/run.sh      # 127 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),
