@@ -10,7 +10,7 @@ gate a moment it would otherwise trust itself on.
 |---|---|---|
 | `bash_risk_gate.py` | PreToolUse (Bash) | Read-only commands never reach Jev. Otherwise one call asks: irreversible? could it kill the running session? named target or a pattern? allow / confirm / block. Denies a session-killing pattern, asks on irreversible or broad ones, stays silent on the rest so the normal permission flow decides. |
 | `precompact_triage.py` + `sessionstart_reinject.py` | PreCompact, SessionStart(compact) | Before compaction, judges every user prompt and assistant conclusion: is it a decision, correction, constraint or open question a future turn must honour, and has it been superseded? Writes the keep-set; after compaction, the SessionStart hook prints it back into context. The summary still gets written by Claude; Jev decides what it must not lose. |
-| `subagent_verify.py` | SubagentStop | Reads the subagent's task (its first prompt) and its final report. One yes/no per criterion: was it actually done, with evidence? Plus: does the report cite evidence at all, and does it say what was not done? An unmet criterion sends the subagent back once with the reason. |
+| `subagent_verify.py` | SubagentStop | Reads the subagent's task and **what its tools actually did**. One yes/no per criterion asks whether the RECORD shows it, never whether the report claims it, plus a check for specifics the report cites that appear nowhere in the record. Zero tool calls with criteria claimed is blocked outright. An honest "not done" always passes. |
 | `loop_detect.py` | PostToolUse (any tool) | Keeps the last six tool calls per session. Only when the last three tool names repeat does it ask one score: same failure again, unclear, or clear progress. Three no-progress scores in a row post a system message naming the repeated tool and the last error, and tell the model to change approach. Never blocks a tool. |
 | `stop_selfcheck.py` | Stop | Reads only the final message, the last user prompt and the tail of recent tool results. Three yes/no questions in one call: does it promise work not yet done, does it fail to answer what the user last asked, does it state an outcome the tool results do not show. Any answer at or above 0.7 sends the session back once with the check named and the offending sentence quoted. |
 | `prompt_routing.py` | UserPromptSubmit | Reads the prompt alone, never the transcript. One choice says what kind of message it is (question, change request, thinking aloud, approval, other) and, when the machine lists skills, a second choice names the relevant one. Prints one line of context only when confident: a question is answered not acted on, an approval means proceed, thinking aloud gets a response not work. Change requests get nothing. Skips prompts under 12 characters, slash commands and pasted tool blocks. |
@@ -176,6 +176,29 @@ can be re-run unnarrowed.
    free fast path the most common call in a session would pay ~300 ms and ~680 tokens every
    time. Anything under 64 KB is skipped outright: a small file cannot be bulky, and there
    is nothing to decide.
+
+### Why the verifier judges the record
+
+Measured 2026-09-20: a fabricated hand-back — invented test names, a file path
+with a line number, a PR number, a passing timing, **zero tool calls** — passed
+this hook in silence. It is the same hole the graph's own verification had, and
+it sat in the component vouching for every agent.
+
+It now judges `work`, the recorded output of tools the agent actually invoked.
+Five cases, live against jev-1.13.0:
+
+| Case | Verdict |
+|---|---|
+| fabrication, zero tool calls | blocked, "made NO tool calls" |
+| fabrication, unrelated work only | blocked on the criteria |
+| honest "not done", zero tool calls | passes — it claims nothing |
+| real work, matching output | passes |
+| real work, report inflates it | blocked on invented specifics |
+
+Two bugs the tests caught while writing it: the parent's spawning `Agent` call
+appears in a fork's own transcript, so counting it made a do-nothing agent look
+busy; and blocking an honest "not done" just repeats the instruction the agent
+followed, which is a loop.
 
 ### What this cannot know
 

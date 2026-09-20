@@ -185,3 +185,38 @@ def _log_strategy(name):
             f.write(json.dumps({"t": time.time(), "task_prompt": name}) + "\n")
     except Exception:
         pass
+
+
+def tool_results(path, tail=30, chars=6000):
+    """The most recent tool results from a transcript, newest-bounded.
+
+    This is the only record of what an agent ACTUALLY did. A report is a
+    claim; these are the commands that ran and what they printed. Shared by
+    the stop check and the subagent verifier so the two cannot drift: both
+    judge a claim against this, never against the claim's own prose.
+    """
+    results = [s["text"] for s in segments(path) if s["kind"] == "tool_result"]
+    out, size = [], 0
+    for r in reversed(results[-tail:]):
+        if size + len(r) > chars:
+            break
+        out.append(r)
+        size += len(r)
+    return list(reversed(out))
+
+
+def tool_call_count(path, exclude=("Agent",)):
+    """How many tools the agent invoked ITSELF. Zero means it did nothing,
+    whatever its report says.
+
+    A fork's transcript opens with the PARENT's `Agent` call — the spawn, not
+    the child's work — so counting it made a do-nothing agent look busy and the
+    zero-work gate never fired."""
+    n = 0
+    for s in segments(path):
+        if s["kind"] != "tool_use":
+            continue
+        name = s["text"].split(":", 1)[0].strip()
+        if name not in exclude:
+            n += 1
+    return n

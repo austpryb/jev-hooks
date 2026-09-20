@@ -7,7 +7,7 @@
     {
       "name": "jev-hooks",
       "source": "./",
-      "version": "0.8.0",
+      "version": "0.9.0",
       "description": "Eight Claude Code hooks backed by TypeSafe's Jev (System One): a Bash risk gate, compaction triage that preserves decisions, verification of subagent reports, a Stop self-check, loop detection, a prompt-kind hint, a gate on file writes git cannot undo and a gate that narrows bulky tool output before it enters context. Your own TYPESAFE_API_KEY; every hook fails open."
     }
   ]
