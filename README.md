@@ -1,6 +1,6 @@
 # jev-hooks
 
-Five Claude Code hooks backed by TypeSafe's Jev (System One): fast, calibrated
+Six Claude Code hooks backed by TypeSafe's Jev (System One): fast, calibrated
 yes/no and multiple-choice judgments at roughly 300 ms per judgment and a fraction of a cent
 (the loop detector's no-repeat fast path is ~100 ms, which is interpreter start, not Jev).
 Jev never generates text here. It answers bounded questions so the harness can
@@ -13,6 +13,7 @@ gate a moment it would otherwise trust itself on.
 | `subagent_verify.py` | SubagentStop | Reads the subagent's task (its first prompt) and its final report. One yes/no per criterion: was it actually done, with evidence? Plus: does the report cite evidence at all, and does it say what was not done? An unmet criterion sends the subagent back once with the reason. |
 | `loop_detect.py` | PostToolUse (any tool) | Keeps the last six tool calls per session. Only when the last three tool names repeat does it ask one score: same failure again, unclear, or clear progress. Three no-progress scores in a row post a system message naming the repeated tool and the last error, and tell the model to change approach. Never blocks a tool. |
 | `stop_selfcheck.py` | Stop | Reads only the final message, the last user prompt and the tail of recent tool results. Three yes/no questions in one call: does it promise work not yet done, does it fail to answer what the user last asked, does it state an outcome the tool results do not show. Any answer at or above 0.7 sends the session back once with the check named and the offending sentence quoted. |
+| `prompt_routing.py` | UserPromptSubmit | Reads the prompt alone, never the transcript. One choice says what kind of message it is (question, change request, thinking aloud, approval, other) and, when the machine lists skills, a second choice names the relevant one. Prints one line of context only when confident: a question is answered not acted on, an approval means proceed, thinking aloud gets a response not work. Change requests get nothing. Skips prompts under 12 characters, slash commands and pasted tool blocks. |
 
 ## Install
 
@@ -41,6 +42,23 @@ now"; the only tool result is an `ok` line from `go build`):
 The middle message is the point: saying plainly what was not done is an answer, and a
 conditional offer after a complete report is not a promise. The first version of the
 questions blocked it; the criteria now say both things explicitly.
+
+## Prompt routing, live
+
+Run 2026-09-19 against `jev-latest` (resolving to `jev-1.13.0` that day), from the
+enforcer-graph checkout, whose skills list holds the platform's skills:
+
+| Prompt | kind (confidence) | Printed |
+|---|---|---|
+| "why does the frontier release cancelled dependents?" | question (1.00) | the answer-and-report hint |
+| "merge 58 and go" | change_request (0.54) | nothing |
+| "i keep thinking the kanban projection is the wrong shape" | thinking_aloud (1.00) | the do-not-start hint |
+
+The middle row is the interesting one: "merge 58 and go" is an instruction to act, not
+consent to a proposal, and the judge split it between change request and approval at
+0.54, under the 0.70 bar, so it stayed silent rather than guess. No skill cleared the
+bar for any of the three. Latency 338 to 357 ms per prompt including the call, against
+a 400 ms budget; 66 ms against the local stub. Each call costs about 630 input tokens.
 
 ## Every hook fails open
 
