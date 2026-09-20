@@ -1,6 +1,6 @@
 # jev-hooks
 
-Six Claude Code hooks backed by TypeSafe's Jev (System One): fast, calibrated
+Seven Claude Code hooks backed by TypeSafe's Jev (System One): fast, calibrated
 yes/no and multiple-choice judgments at roughly 300 ms per judgment and a fraction of a cent
 (the loop detector's no-repeat fast path is ~100 ms, which is interpreter start, not Jev).
 Jev never generates text here. It answers bounded questions so the harness can
@@ -14,6 +14,7 @@ gate a moment it would otherwise trust itself on.
 | `loop_detect.py` | PostToolUse (any tool) | Keeps the last six tool calls per session. Only when the last three tool names repeat does it ask one score: same failure again, unclear, or clear progress. Three no-progress scores in a row post a system message naming the repeated tool and the last error, and tell the model to change approach. Never blocks a tool. |
 | `stop_selfcheck.py` | Stop | Reads only the final message, the last user prompt and the tail of recent tool results. Three yes/no questions in one call: does it promise work not yet done, does it fail to answer what the user last asked, does it state an outcome the tool results do not show. Any answer at or above 0.7 sends the session back once with the check named and the offending sentence quoted. |
 | `prompt_routing.py` | UserPromptSubmit | Reads the prompt alone, never the transcript. One choice says what kind of message it is (question, change request, thinking aloud, approval, other) and, when the machine lists skills, a second choice names the relevant one. Prints one line of context only when confident: a question is answered not acted on, an approval means proceed, thinking aloud gets a response not work. Change requests get nothing. Skips prompts under 12 characters, slash commands and pasted tool blocks. |
+| `narrow_output.py` | PreToolUse (Bash, Read, Grep) | Judges output **before** it enters context. A command that already limits itself, one with no command or path, and anything not provably read-only never reach Jev. Otherwise one call over the command and the last user prompt asks: is this far more output than the goal needs, does the goal need all of it, and which end carries the answer. Only when bulky ≥ 0.7 and needs_all < 0.3 does it append `| head -200` / `| tail -200` (Read gets `limit`, Grep `head_limit`). It only ever appends a limiter — never a path, a pattern or a flag's value — and the rewrite prints a marker saying what was cut. |
 
 ## Install
 
@@ -74,6 +75,55 @@ in the criteria, with live checks either way:
 A plain promise ("I'll open the PR next"), a plan in place of results, and an
 unevidenced past result ("all 41 checks pass") all still block.
 
+## Narrowing output, live
+
+Tool results dominate a session's context — in one real transcript ~1460 tool results
+against ~750 assistant messages — and every turn re-sends all of it. The cheapest place
+to attack that is the moment before the call, where one 300 ms judgment can keep a whole
+log out of the transcript for good.
+
+Run 2026-09-19 against the live service, three real calls with the goal taken from the
+last user prompt:
+
+| Command | Goal | bulky | needs_all | where | Decision | Latency |
+|---|---|---|---|---|---|---|
+| `cat /var/log/syslog` | "why did the service restart" | 0.96 | 0.15 | tail (0.88) | **narrowed** to `\| tail -200` | 405 ms |
+| `wc -l big.csv` | "how many rows" | — | — | — | fast path, **no call** | 132 ms |
+| `grep -rn TODO .` | "count the TODOs" | 0.92 | 0.92 | tail (0.54) | silent — left alone | 450 ms |
+
+The middle row costs nothing at all: `wc` already bounds its own output, so there is
+nothing to decide. The third is the one the rails exist for — the output really is bulky
+(0.92), but counting every match needs all of it, so narrowing would produce a confidently
+wrong number. `cat big.csv` with the same "how many rows" goal scores bulky 0.97 and
+needs_all 0.83 and is likewise left alone. Each call costs about 680 input tokens.
+
+The narrowed command is rewritten so the truncation is visible in its own output:
+
+```bash
+{ { cat /var/log/syslog
+} | tail -200
+echo '[jev-hooks: last 200 lines only — the rest of this output was not shown. Re-run the command without the | tail -200 to see all of it.]'
+}
+```
+
+The newlines are load-bearing: a command ending in a trailing `# comment` would swallow a
+closing `;` and the rewrite would not parse. A `systemMessage` names what was narrowed and
+why on every narrowing, so it is visible and can be re-run unnarrowed.
+
+### The rails, which are the point
+
+1. **Never narrow anything not provably read-only.** It imports `bash_risk_gate.is_read_only`
+   rather than copying it, so there is one copy of that predicate. A redirect, `$(`, a
+   backtick, `-delete`, `-exec`, `xargs`, `tee` or any non-read-only verb is left alone.
+2. **Only ever append.** A limiter on the end, `limit` on a Read, `head_limit` on a Grep.
+   Never a path, a pattern, a flag's value or the command's meaning.
+3. **The truncation is visible in the output itself**, so a later reader — human or model —
+   is never misled into thinking they saw everything.
+4. **`JEV_HOOKS_NARROW=off`** disables it entirely: exit 0, no call.
+5. **Fails open** on no key, timeout, 429/529, malformed stdin. And with no goal in the
+   transcript it does nothing at all: there is nothing for "bulky" to be relative to, and a
+   judge asked to guess one would narrow on the command's looks alone.
+
 ## What the hooks decided, and tuning them with it
 
 Every hook records its own verdict next to what the call cost, to
@@ -115,14 +165,16 @@ deny for read-only commands, which it short-circuits before any network call.
 The gate sends the command, its description and the cwd. Triage sends user
 prompts and assistant prose, clipped, never tool output or thinking. Verify
 sends the subagent's task and last message. The stop check sends the last user
-prompt, the final message and up to 6k chars of recent tool results. TypeSafe stores inputs by
+prompt, the final message and up to 6k chars of recent tool results. The narrowing
+gate sends the command or path, its description and the last user prompt as the goal,
+clipped to 1500 chars — never any tool output. TypeSafe stores inputs by
 default with no stated retention period (US-hosted, not used for training); read
 their terms before enabling this on a repository whose prompts are sensitive.
 
 ## Test
 
 ```bash
-bash test/run.sh      # 53 checks against a local stub; no key, no network
+bash test/run.sh      # 88 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),
