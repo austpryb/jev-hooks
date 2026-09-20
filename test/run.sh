@@ -214,4 +214,24 @@ check "task_prompt: compaction summary first -> the last Agent call is the task"
 tp2=$(python3 -c "import sys;sys.path.insert(0,'lib');import transcript;print(transcript.task_prompt('test/fixtures/subagent.jsonl')[:14])")
 check "task_prompt: plain agent transcript still uses its first prompt" '[ "$tp2" = "Execute node X" ]'
 
+# --- stop check: a next step blocked on the user is not a promise (2026-09-20)
+gate_msg="The release is merged and both images are built; migrations 020 and 021 applied. The roll PR is #402 and needs your merge: gh pr merge 402. [promise=no] [unanswered=no] [unverified=no]"
+gin=$(python3 -c "import json,sys;print(json.dumps({'transcript_path':'$PWD/test/fixtures/gate_session.jsonl','last_assistant_message':sys.argv[1],'stop_hook_active':False}))" "$gate_msg")
+gout=$(printf '%s' "$gin" | python3 hooks/stop_selfcheck.py)
+check "stop check: a step blocked on the user, after a report, passes" '[ -z "$gout" ]'
+promise_msg="I'll open the PR next and report back. [promise=yes] [unanswered=no] [unverified=no]"
+pin=$(python3 -c "import json,sys;print(json.dumps({'transcript_path':'$PWD/test/fixtures/gate_session.jsonl','last_assistant_message':sys.argv[1],'stop_hook_active':False}))" "$promise_msg")
+pout=$(printf '%s' "$pin" | python3 hooks/stop_selfcheck.py)
+check "stop check: a plain promise still blocks" 'echo "$pout" | grep -q "\"decision\": \"block\""'
+
+# --- stop check: an expected result from a check not yet run is not an unverified claim
+fut_msg="The fix is merged and the image is built. The roll will show 200 instead of 404 once applied. [promise=no] [unanswered=no] [unverified=no]"
+fin=$(python3 -c "import json,sys;print(json.dumps({'transcript_path':'$PWD/test/fixtures/gate_session.jsonl','last_assistant_message':sys.argv[1],'stop_hook_active':False}))" "$fut_msg")
+fout=$(printf '%s' "$fin" | python3 hooks/stop_selfcheck.py)
+check "stop check: an expected future result passes" '[ -z "$fout" ]'
+past_msg="All 41 checks pass and the release is deployed. [promise=no] [unanswered=no] [unverified=yes]"
+pin2=$(python3 -c "import json,sys;print(json.dumps({'transcript_path':'$PWD/test/fixtures/gate_session.jsonl','last_assistant_message':sys.argv[1],'stop_hook_active':False}))" "$past_msg")
+pout2=$(printf '%s' "$pin2" | python3 hooks/stop_selfcheck.py)
+check "stop check: an unevidenced PAST result still blocks" 'echo "$pout2" | grep -q "\"decision\": \"block\""'
+
 echo; echo "$pass passed, $fail failed"; [ "$fail" -eq 0 ]
