@@ -176,4 +176,36 @@ ld "$(ev pr1 Bash x out 0)" >/dev/null; printf '%s' "{\"session_id\":\"pr2\",\"t
 check "prune: keep and loop files older than 14 days are deleted" '[ ! -e "$CLAUDE_PLUGIN_DATA/keep/old.md" ] && [ ! -e "$CLAUDE_PLUGIN_DATA/loops/old.json" ]'
 # --- end audit fixes
 
+# --- prompt routing (UserPromptSubmit) ---------------------------------------
+pr() { printf '%s' "$1" | JEV_HOOKS_DEBUG=1 python3 hooks/prompt_routing.py 2>"$CLAUDE_PLUGIN_DATA/pr.err"; }
+out=$(pr '{"prompt":"why does the frontier release cancelled dependents? [kind=pick:question] [skill=pick:none]","cwd":"/tmp"}')
+check "routing: a question gets the answer-and-report hint" 'echo "$out" | grep -q "reads as a question"'
+out=$(pr '{"prompt":"yes merge 58 and go please [kind=pick:approval] [skill=pick:none]","cwd":"/tmp"}')
+check "routing: an approval gets the proceed hint" 'echo "$out" | grep -q "reads as approval"'
+out=$(pr '{"prompt":"i keep thinking the projection is the wrong shape [kind=pick:thinking_aloud] [skill=pick:none]","cwd":"/tmp"}')
+check "routing: thinking aloud gets the do-not-start hint" 'echo "$out" | grep -q "reads as thinking aloud"'
+out=$(pr '{"prompt":"add an index on runs.started_at please [kind=pick:change_request] [skill=pick:none]","cwd":"/tmp"}')
+check "routing: a change request prints nothing" '[ -z "$out" ]'
+out=$(pr '{"prompt":"ok go","cwd":"/tmp"}')
+check "routing: a prompt under 12 chars skips the call" '[ -z "$out" ] && grep -q "^skip" "$CLAUDE_PLUGIN_DATA/pr.err"'
+out=$(pr '{"prompt":"/compact please do it right now","cwd":"/tmp"}')
+check "routing: a slash command skips the call" '[ -z "$out" ] && grep -q "^skip" "$CLAUDE_PLUGIN_DATA/pr.err"'
+out=$(pr '{"prompt":"<bash-input>ls -la</bash-input><bash-stdout>x y z</bash-stdout>","cwd":"/tmp"}')
+check "routing: a fully wrapped prompt skips the call" '[ -z "$out" ] && grep -q "^skip" "$CLAUDE_PLUGIN_DATA/pr.err"'
+# skill pick: a project skills dir with two names; the stub picks the steered one
+SK="$CLAUDE_PLUGIN_DATA/proj"; mkdir -p "$SK/.claude/skills/deploy-thing" "$SK/.claude/skills/write-docs" "$SK/sub/dir"
+out=$(pr "{\"prompt\":\"deploy the thing to staging now [kind=pick:change_request] [skill=pick:deploy-thing]\",\"cwd\":\"$SK/sub/dir\"}")
+check "routing: a project skill is found walking up from cwd and named in the hint" 'echo "$out" | grep -q "Relevant skill: deploy-thing\."'
+out=$(pr "{\"prompt\":\"why does the frontier release cancelled dependents? [kind=pick:question] [skill=pick:write-docs]\",\"cwd\":\"$SK\"}")
+check "routing: kind hint and skill hint combine on one line" '[ "$(echo "$out" | wc -l)" -eq 1 ] && echo "$out" | grep -q "reads as a question" && echo "$out" | grep -q "Relevant skill: write-docs\."'
+# more than 100 skills: no skill question at all, so a steered pick cannot appear
+MANY="$CLAUDE_PLUGIN_DATA/many"; for i in $(seq 1 101); do mkdir -p "$MANY/.claude/skills/s$i"; done
+out=$(pr "{\"prompt\":\"deploy the thing to staging now [kind=pick:change_request] [skill=pick:s7]\",\"cwd\":\"$MANY\"}")
+check "routing: more than 100 skill names skips the skill question" '[ -z "$out" ]'
+out=$(printf '%s' '{"prompt":"why is the build red this morning then? [kind=pick:question]","cwd":"/tmp"}' | TYPESAFE_BASE_URL=http://127.0.0.1:1 python3 hooks/prompt_routing.py)
+check "routing: Jev unreachable is silent" '[ -z "$out" ]'
+s=$(date +%s%N); pr '{"prompt":"why does the frontier release cancelled dependents? [kind=pick:question] [skill=pick:none]","cwd":"/tmp"}' >/dev/null; e=$(date +%s%N)
+check "routing: under 400 ms against the stub ($(( (e-s)/1000000 )) ms)" '[ $(( (e-s)/1000000 )) -lt 400 ]'
+# --- end prompt routing
+
 echo; echo "$pass passed, $fail failed"; [ "$fail" -eq 0 ]
