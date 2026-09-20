@@ -60,6 +60,20 @@ consent to a proposal, and the judge split it between change request and approva
 bar for any of the three. Latency 338 to 357 ms per prompt including the call, against
 a 400 ms budget; 66 ms against the local stub. Each call costs about 630 input tokens.
 
+### What the stop check does not treat as a failure
+
+Two classes were false positives in real use (2026-09-20) and are now excepted
+in the criteria, with live checks either way:
+
+- **A next step blocked on the user** — "the roll PR needs your merge" — named
+  once alongside what was finished. Naming the gate is a report of where the
+  work stands, not a promise the assistant can keep.
+- **An outcome expected from a check not yet run** — "the roll will show 200
+  instead of 404". That is intent; claiming the check already passed is not.
+
+A plain promise ("I'll open the PR next"), a plan in place of results, and an
+unevidenced past result ("all 41 checks pass") all still block.
+
 ## Every hook fails open
 
 No key, a timeout, a 429 or 529: the hook exits 0 with no output and the
