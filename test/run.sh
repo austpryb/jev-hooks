@@ -555,4 +555,20 @@ f=tempfile.NamedTemporaryFile('w',suffix='.jsonl',delete=False); f.write('\n'.jo
 print(transcript.tool_call_count(f.name))")
 check "verify: the parent's spawning Agent call is not counted as the child's work" '[ "$cnt" = "0" ]'
 
+# The README states this number, and a number in prose drifts silently: it said
+# 111 while the suite ran 126, and the count of your own tests is the first
+# claim a reader checks. So the suite asserts its own README rather than
+# trusting anyone to remember.
+readme_n=$(grep -oE '[0-9]+ checks against a local stub' README.md | grep -oE '^[0-9]+')
+# +1 counts THIS check, so the README's number is the whole suite as a reader
+# sees it printed, not the suite minus its own guard.
+total=$((pass+fail+1))
+if [ -n "$readme_n" ] && [ "$readme_n" != "$total" ]; then
+  echo "FAIL  README says $readme_n checks; the suite ran $total - update README.md"
+  fail=$((fail+1))
+else
+  echo "PASS  README's check count matches the suite ($total)"
+  pass=$((pass+1))
+fi
+
 echo; echo "$pass passed, $fail failed"; [ "$fail" -eq 0 ]
