@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Ask Jev a bounded question from the shell.
+
+    jev noul   "Does the diff change behaviour, not just formatting?" --state-file diff.txt
+    jev choice "What kind of change is this?" --option fix --option feature --option refactor --state "..."
+    jev score  "How risky is this change?" --level "contained" --level "spreads" --level "structural" --state-file plan.md
+    jev ask    questions.json --state-file state.txt        # several questions in ONE call
+
+Exit status: 0 with the answer as JSON on stdout. 3 when the judge could not be
+reached (no key, timeout, overloaded) — a caller that must not stall should
+treat 3 as "no opinion" and carry on, which is what every hook here does.
+
+Questions in one request are INDEPENDENT and cost little more than one: prefer
+`ask` with a JSON file over several calls. See the `jev` skill for how to word
+a criterion that does not produce false positives, and for what must never be
+built on this (a general-purpose pass-through is forbidden by the licence).
+"""
+import argparse, json, os, sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+import jev  # noqa: E402
+
+
+def read_state(args):
+    if args.state_file:
+        with open(args.state_file) as f:
+            return f.read()[: args.max_chars]
+    if args.state:
+        return args.state[: args.max_chars]
+    if not sys.stdin.isatty():
+        return sys.stdin.read()[: args.max_chars]
+    return ""
+
+
+def main():
+    p = argparse.ArgumentParser(prog="jev", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("kind", choices=["noul", "choice", "score", "ask"])
+    p.add_argument("question", help="the question, or a JSON file of questions when kind is `ask`")
+    p.add_argument("--state", help="the content to judge")
+    p.add_argument("--state-file", help="read the content from a file (or pipe it on stdin)")
+    p.add_argument("--option", action="append", default=[], help="choice: an option (repeat)")
+    p.add_argument("--level", action="append", default=[], help="score: a level, lowest first (repeat, 2-10)")
+    p.add_argument("--true", dest="t", help="noul: what a yes looks like")
+    p.add_argument("--false", dest="f", help="noul: what a no looks like")
+    p.add_argument("--max-chars", type=int, default=120_000, help="clip the state (the budget is ~32k tokens)")
+    p.add_argument("--raw", action="store_true", help="print the whole answer map, not just the verdict")
+    a = p.parse_args()
+
+    state = read_state(a)
+    if not state:
+        print("jev: no state to judge — pass --state, --state-file, or pipe it in", file=sys.stderr)
+        sys.exit(2)
+
+    if a.kind == "ask":
+        with open(a.question) as f:
+            questions = json.load(f)
+    elif a.kind == "noul":
+        questions = {"q": jev.noul(a.question, true=a.t, false=a.f)}
+    elif a.kind == "choice":
+        if len(a.option) < 2:
+            print("jev: choice needs at least two --option values", file=sys.stderr); sys.exit(2)
+        questions = {"q": jev.choice(a.question, {o: None for o in a.option})}
+    else:
+        if len(a.level) < 2:
+            print("jev: score needs at least two --level values, lowest first", file=sys.stderr); sys.exit(2)
+        questions = {"q": jev.score(a.question, a.level)}
+
+    answers = jev.ask(state, questions)
+    if not answers:
+        print("jev: no opinion (the judge could not be reached)", file=sys.stderr)
+        sys.exit(3)
+    jev.record("cli", a.kind, answers)
+    if a.raw or a.kind == "ask":
+        print(json.dumps(answers, indent=2)); return
+    q = answers["q"]
+    print(json.dumps({k: v for k, v in q.items() if k != "legend"}, indent=2))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"jev: {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(3)

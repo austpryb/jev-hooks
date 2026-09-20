@@ -496,4 +496,24 @@ out=$(printf '%s' "$(egin Write "{\"file_path\":\"$EG/untracked.tf\",\"content\"
 check "edit gate: Jev unreachable fails open" '[ -z "$out" ]'
 # --- end edit risk gate
 
+# --- the jev CLI: a handle any agent can reach from the shell
+out=$(./bin/jev noul "Is this a completed action? [q=yes]" --state "shipped it" 2>/dev/null)
+check "cli: noul returns the probability as JSON" 'echo "$out" | python3 -c "import json,sys;d=json.load(sys.stdin);sys.exit(0 if d[\"type\"]==\"noul\" and d[\"noul\"]==1.0 else 1)"'
+out=$(./bin/jev choice "Which one? [q=pick:beta]" --option alpha --option beta --state "x" 2>/dev/null)
+check "cli: choice picks an option" 'echo "$out" | grep -q "\"choice\": \"beta\""'
+out=$(./bin/jev score "How much? [q=level:2]" --level low --level mid --level high --state "x" 2>/dev/null)
+check "cli: score returns a level" 'echo "$out" | grep -q "\"score\": 2"'
+./bin/jev choice "one option only" --option alpha --state "x" >/dev/null 2>&1
+check "cli: choice with fewer than two options is refused" '[ $? -eq 2 ]'
+./bin/jev noul "no state" >/dev/null 2>&1 </dev/null
+check "cli: no state is refused, not silently judged" '[ $? -eq 2 ]'
+TYPESAFE_BASE_URL=http://127.0.0.1:1 ./bin/jev noul "x" --state "y" >/dev/null 2>&1
+check "cli: unreachable judge exits 3 (no opinion), never a crash" '[ $? -eq 3 ]'
+out=$(printf 'piped state' | ./bin/jev noul "From stdin? [q=yes]" 2>/dev/null)
+check "cli: state can be piped on stdin" 'echo "$out" | grep -q "\"noul\": 1.0"'
+cliq=$(mktemp); printf '{"a":{"type":"noul","instructions":"one [a=yes]"},"b":{"type":"noul","instructions":"two [b=no]"}}' > "$cliq"
+out=$(./bin/jev ask "$cliq" --state "x" 2>/dev/null); rm -f "$cliq"
+check "cli: ask sends several questions in ONE call" 'echo "$out" | grep -q "\"a\"" && echo "$out" | grep -q "\"b\""'
+check "skill: the jev skill exists with frontmatter and the licence rules" '[ -f skills/jev/SKILL.md ] && head -1 skills/jev/SKILL.md | grep -q "^---$" && grep -q "No pass-through" skills/jev/SKILL.md && grep -q "No published comparisons" skills/jev/SKILL.md'
+
 echo; echo "$pass passed, $fail failed"; [ "$fail" -eq 0 ]
