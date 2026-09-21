@@ -26,6 +26,25 @@ check "gate: warn mode downgrades deny to ask" 'echo "$out" | grep -q "\"permiss
 out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/x"}}' | TYPESAFE_BASE_URL=http://127.0.0.1:1 python3 hooks/bash_risk_gate.py)
 check "gate: Jev unreachable fails open" '[ -z "$out" ]'
 
+# A prompt that fires on a third of all commands is a prompt nobody reads
+# (2026-09-21: over 1042 logged gate decisions, a bare `confirm` verdict drove
+# 256 of 259 prompts, mostly heredoc edits and scratchpad writes, while 88 were
+# actually irreversible). A confirm now needs confidence AND something at stake.
+out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"python3 - <<PY # [irreversible=no] [action=pick:confirm]\nopen(\"test/run.sh\").read()\nPY"}}' | python3 hooks/bash_risk_gate.py)
+check "gate: a confirm with nothing at stake no longer interrupts" '[ -z "$out" ]'
+
+# Outward-facing commands ask without a judgment call: nothing local is
+# destroyed, so they score low, but no local undo reaches a merged PR either.
+before=$(wc -l < "$JEV_STUB_RECORD")
+out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"cd ~/apps/x && gh pr merge 13 --squash --delete-branch"}}' | python3 hooks/bash_risk_gate.py)
+check "gate: merging a PR always asks" 'echo "$out" | grep -q "\"permissionDecision\": \"ask\"" && echo "$out" | grep -q "publishes, merges or deploys"'
+check "gate: an outward command asks without spending a Jev call" '[ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
+out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git push --dry-run origin main"}}' | python3 hooks/bash_risk_gate.py)
+check "gate: a dry run is not a push" '! echo "$out" | grep -q "publishes, merges or deploys"'
+# Anchored to a segment start, so prose that names a push is not one.
+out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"echo \"then run git push origin main\" > /tmp/notes.txt"}}' | python3 hooks/bash_risk_gate.py)
+check "gate: a command that merely MENTIONS a push is not treated as one" '! echo "$out" | grep -q "publishes, merges or deploys"'
+
 # --- precompact triage + sessionstart reinject
 printf '%s' "{\"session_id\":\"s1\",\"transcript_path\":\"$PWD/test/fixtures/session.jsonl\",\"hook_event_name\":\"PreCompact\",\"trigger\":\"auto\"}" | python3 hooks/precompact_triage.py
 keep="$CLAUDE_PLUGIN_DATA/keep/s1.md"

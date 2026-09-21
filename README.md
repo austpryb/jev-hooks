@@ -8,7 +8,7 @@ gate a moment it would otherwise trust itself on.
 
 | Hook | Event | What it does |
 |---|---|---|
-| `bash_risk_gate.py` | PreToolUse (Bash) | Read-only commands never reach Jev. Otherwise one call asks: irreversible? could it kill the running session? named target or a pattern? allow / confirm / block. Denies a session-killing pattern, asks on irreversible or broad ones, stays silent on the rest so the normal permission flow decides. |
+| `bash_risk_gate.py` | PreToolUse (Bash) | Read-only commands never reach Jev, and an outward-facing one (`gh pr merge`, `git push`, `terraform apply`, `helm upgrade`, `kubectl apply/delete`, `npm publish`, …) asks without one: nothing local is destroyed, so it scores low, but no local undo reaches a merged PR. Otherwise one call asks: irreversible? could it kill the running session? named target or a pattern? allow / confirm / block. Denies a session-killing pattern; asks when it is irreversible (p≥0.5), when a pattern widens it, or when a confident `confirm` meets real stakes; stays silent on the rest so the normal permission flow decides. |
 | `precompact_triage.py` + `sessionstart_reinject.py` | PreCompact, SessionStart(compact) | Before compaction, judges every user prompt and assistant conclusion: is it a decision, correction, constraint or open question a future turn must honour, and has it been superseded? Writes the keep-set; after compaction, the SessionStart hook prints it back into context. The summary still gets written by Claude; Jev decides what it must not lose. |
 | `subagent_verify.py` | SubagentStop | Reads the subagent's task and **what its tools actually did**. One yes/no per criterion asks whether the RECORD shows it, never whether the report claims it, plus a check for specifics the report cites that appear nowhere in the record. Zero tool calls with criteria claimed is blocked outright. An honest "not done" always passes. |
 | `loop_detect.py` | PostToolUse (any tool) | Keeps the last six tool calls per session. Only when the last three tool names repeat does it ask one score: same failure again, unclear, or clear progress. Three no-progress scores in a row post a system message naming the repeated tool and the last error, and tell the model to change approach. Never blocks a tool. |
@@ -305,7 +305,7 @@ their terms before enabling this on a repository whose prompts are sensitive.
 ## Test
 
 ```bash
-bash test/run.sh      # 132 checks against a local stub; no key, no network
+bash test/run.sh      # 137 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),
