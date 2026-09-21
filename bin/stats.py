@@ -18,12 +18,17 @@ BANDS = (0.60, 0.80)
 
 
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else jev.find_log()
+    # --v=0.15.0 counts only decisions that version of the code made. Sessions
+    # keep running the version they started with, so a log always mixes them.
+    args = [a for a in sys.argv[1:] if not a.startswith("--v=")]
+    only = next((a[4:] for a in sys.argv[1:] if a.startswith("--v=")), None)
+    path = args[0] if args else jev.find_log()
     if not os.path.exists(path):
         print(f"no decision log at {path}"); return
     by_hook = collections.defaultdict(collections.Counter)
     probs = collections.defaultdict(list)
     disputed = collections.Counter()
+    versions = collections.Counter()
     calls = tokens = 0
     secs = []
     for line in open(path):
@@ -31,6 +36,10 @@ def main():
             r = json.loads(line)
         except Exception:
             continue
+        if r.get("kind") == "decision":
+            versions[r.get("v", "unversioned")] += 1
+            if only and r.get("v") != only:
+                continue
         if r.get("kind") == "call":
             calls += 1
             tokens += (r.get("usage") or {}).get("input_tokens", 0)
@@ -45,7 +54,8 @@ def main():
         elif r.get("kind") == "dispute":
             disputed[r.get("hook", "?")] += 1
 
-    print(f"log: {path}")
+    print(f"log: {path}" + (f"  (decisions from v{only} only)" if only else ""))
+    print("decisions by plugin version: " + ", ".join(f"{v} {n}" for v, n in sorted(versions.items())))
     print(f"calls {calls}  input tokens {tokens:,}  cost ${tokens * 0.042 / 1_000_000:.4f}"
           + (f"  median {sorted(secs)[len(secs)//2]:.2f}s" if secs else ""))
     print()

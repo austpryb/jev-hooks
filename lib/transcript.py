@@ -217,6 +217,28 @@ def is_subagent_transcript(path, lines=40):
     return False
 
 
+def is_main_session_transcript(path, lines=40):
+    """A MAIN session's transcript: its records say `"isSidechain": false` and
+    none carries a subagent marker. Measured 2026-09-21: SubagentStop fired with
+    no agent_transcript_path and no agent_type, handing over a main session's
+    transcript (no Agent calls, ten typed prompts), and the verifier judged
+    that session's own twelve-point prompt as the subagent's task. Test
+    fixtures and older harnesses write no isSidechain key at all, so only an
+    explicit `false` counts."""
+    if is_subagent_transcript(path, lines):
+        return False
+    try:
+        with open(path) as f:
+            for n, line in enumerate(f):
+                if n >= lines:
+                    break
+                if '"isSidechain": false' in line or '"isSidechain":false' in line:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 def _summary_first(path):
     for s in segments(path):
         if s["kind"] == "prompt":
@@ -262,9 +284,12 @@ def subagent_path(given, agent_path=None, agent_id=None, report=""):
         return agent_path, "agent_transcript_path"
     if not given:
         return None, "no-path"
-    # A subagent's own file, marked or by shape: judge it. Only a file in which a
-    # typed prompt precedes its first spawn, with no subagent markers, is a parent.
-    if is_subagent_transcript(given) or not _parent_shaped(given):
+    if is_subagent_transcript(given):
+        return given, "given"
+    main = is_main_session_transcript(given)
+    # Unmarked (a fixture, an older harness) and not shaped like a parent: judge it.
+    # Only a file in which a typed prompt precedes its first spawn is a parent.
+    if not main and not _parent_shaped(given):
         return given, "given"
     d = os.path.join(os.path.dirname(given), os.path.splitext(os.path.basename(given))[0], "subagents")
     if agent_id:
@@ -276,7 +301,7 @@ def subagent_path(given, agent_path=None, agent_id=None, report=""):
         for p in sorted(glob.glob(os.path.join(d, "agent-*.jsonl")), key=os.path.getmtime, reverse=True):
             if want and _norm(last_assistant_text(p)) == want:
                 return p, "report-match"
-    return None, "parent-only"
+    return None, "main-session" if main else "parent-only"
 
 
 LAST_STRATEGY = "none"

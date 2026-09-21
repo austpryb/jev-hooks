@@ -34,6 +34,23 @@ _log_setting = os.environ.get("JEV_HOOKS_LOG")
 LOG = None if _log_setting == "off" else (_log_setting or _default_log())
 
 
+def _version():
+    """The plugin version this code shipped as. Every session runs the copy it
+    started with, so after an update old and new code write the SAME log side by
+    side: measured 2026-09-21, 126 of 201 gate prompts in the three hours after
+    a retune came from sessions still running the pre-retune rule, and nothing
+    in the record could tell them apart. A threshold tuned on a mixed log is
+    tuned on code that no longer runs."""
+    try:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".claude-plugin", "plugin.json")
+        return json.load(open(p)).get("version") or "?"
+    except Exception:
+        return "?"
+
+
+VERSION = _version()
+
+
 def find_log():
     """Where to READ decisions from a shell. The hooks write under
     CLAUDE_PLUGIN_DATA, which the harness sets and a terminal does not, so
@@ -151,7 +168,7 @@ def record(hook, decision, answers=None, note=None, **extra):
             probs[k] = [v["choice"], round(float(v.get("confidence") or 0), 3)]
         elif "score" in v:
             probs[k] = [round(float(v["score"]), 3), round(float(v.get("confidence") or 0), 3)]
-    rec = {"t": time.time(), "kind": "decision", "hook": hook, "decision": decision, "probs": probs}
+    rec = {"t": time.time(), "kind": "decision", "hook": hook, "decision": decision, "probs": probs, "v": VERSION}
     if note:
         rec["note"] = note[:300]
     rec.update({k: v for k, v in extra.items() if v is not None})
