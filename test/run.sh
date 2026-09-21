@@ -782,6 +782,29 @@ out=$(wsin "Wrote notes.md: the finding is ALPHA-CONTENT-7731. The push was refu
 check "stop check: the judge is shown what the Write wrote" '[ -z "$out" ] && tail -1 "$JEV_STUB_RECORD" | grep -q "ALPHA-CONTENT-7731 is the finding"'
 check "stop check: a permission refusal in the record is named in the state" 'tail -1 "$JEV_STUB_RECORD" | grep -q "\"permission_denied\": true"'
 
+# --- stop check: harness text in the user's turn is not the user's question (2026-09-22)
+# At 6 of 16 blocks in one session the check's "last user prompt" was its own
+# previous complaint, the empty-reply nudge, or a subagent's hand-back.
+HP="$CLAUDE_PLUGIN_DATA/harness_prompt.jsonl"
+python3 - "$HP" <<'PYEOF'
+import json, sys
+def u(c): return json.dumps({"type": "user", "message": {"role": "user", "content": c}})
+def a(t): return json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": t}]}})
+open(sys.argv[1], "w").write("\n".join([u("REAL-USER-QUESTION: is the deploy done?"), a("Not yet."),
+    u("Stop hook feedback: jev-hooks stop check: the message promises work not yet done"), a("It is still building."),
+    u("[Your previous response had no visible output. Please continue.]"), a("Still building."),
+    u("Another Claude session sent a message: <agent-message>report</agent-message>")]) + "\n")
+PYEOF
+hp=$(python3 -c "
+import sys, importlib.util; sys.path.insert(0,'lib')
+s=importlib.util.spec_from_file_location('sc','hooks/stop_selfcheck.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m)
+print(m.last_prompt_and_results(sys.argv[1])[0])" "$HP")
+check "stop check: hook feedback, the empty-reply nudge and a hand-back are never the user's question" '[ "$hp" = "REAL-USER-QUESTION: is the deploy done?" ]'
+# The dispute command reaches the user, and never the model being judged.
+out=$(stopin "All 212 integration tests pass. [promise=no] [unanswered=no] [unverified=yes]" 0 | python3 hooks/stop_selfcheck.py)
+check "stop check: a block tells the USER how to dispute it" 'echo "$out" | python3 -c "import json,sys;d=json.load(sys.stdin);sys.exit(0 if \"bin/wrong.py stop_check\" in d.get(\"systemMessage\",\"\") else 1)"'
+check "stop check: the dispute command is not in the reason the model reads" 'echo "$out" | python3 -c "import json,sys;d=json.load(sys.stdin);sys.exit(0 if \"wrong.py\" not in d[\"reason\"] else 1)"'
+
 # The README states this number, and a number in prose drifts silently: it said
 # 111 while the suite ran 126, and the count of your own tests is the first
 # claim a reader checks. So the suite asserts its own README rather than

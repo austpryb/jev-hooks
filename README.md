@@ -118,6 +118,21 @@ blocked eleven times:
   description of it as a claim from nowhere. The call line now carries the
   first 400 characters of what was written, for this check and the verifier.
 
+And one input bug, measured 2026-09-22 by replaying a session at each block:
+at 6 of 16 blocks, "the last user prompt" was harness text — the check's own
+previous complaint (3), the empty-reply nudge (2), a subagent's hand-back (1)
+— so `unanswered` was judging the reply against the hook. Those are skipped now.
+
+Two changes were tried against the same replay and **not** shipped: widening
+the tool-result window (8k to 32k) did not bring a restated number from
+hundreds of calls earlier into view, so a block on it stands — re-verifying was
+one query. Dropping loop_detect's `counting` records was also wrong: each is a
+paid judgment with a score, not bookkeeping.
+
+When the stop check blocks, the user now gets a `systemMessage` with the exact
+`bin/wrong.py` command to dispute it. It is kept out of `reason`, which the
+model reads: a label from the party being judged is not a label.
+
 A plain promise ("I'll open the PR next"), a plan in place of results, and an
 unevidenced past result ("all 41 checks pass") all still block.
 
@@ -349,7 +364,7 @@ their terms before enabling this on a repository whose prompts are sensitive.
 ## Test
 
 ```bash
-bash test/run.sh      # 181 checks against a local stub; no key, no network
+bash test/run.sh      # 184 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),

@@ -123,6 +123,19 @@ def segments(path):
 
 BOILERPLATE = ("You've inherited the conversation context", "<fork-boilerplate>", "You are a worker fork")
 
+# Text the HARNESS puts in the user's turn: a Stop hook's own block reason, the
+# nudge after an empty reply, a subagent's hand-back. None of it is the user
+# asking anything. Measured 2026-09-22: at 6 of 16 stop-check blocks in one
+# session, the check's "last user prompt" was one of these - three times its
+# own previous complaint - so `unanswered` judged a reply against the hook.
+HARNESS_PROMPTS = ("Stop hook feedback:", "[Your previous response had no visible output",
+                   "Another Claude session sent a message:")
+
+
+def is_harness_prompt(text):
+    t = (text or "").lstrip()
+    return any(t.startswith(h) for h in HARNESS_PROMPTS)
+
 
 def first_prompt(path):
     """The task a subagent was given. A forked agent's first prompt is harness
