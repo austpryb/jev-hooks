@@ -16,8 +16,12 @@ import json, os, re, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import jev
 
+# `cd` is here because it only moves the shell: 179 of 532 judged commands in the
+# decision log (2026-09-21) were `cd <repo> && <something already read-only>`,
+# each paying a Jev call and ~300 ms to be told it was harmless. A cd that
+# hides a command (`cd $(...)`) is caught by UNSAFE before this is consulted.
 READ_ONLY = re.compile(
-    r"^\s*(ls|cat|head|tail|wc|pwd|echo|printf|which|type|date|stat|file|tree|du|df|"
+    r"^\s*(cd|ls|cat|head|tail|wc|pwd|echo|printf|which|type|date|stat|file|tree|du|df|"
     r"grep|rg|ugrep|find|fd|sed -n|uniq|cut|tr|jq|yq|diff|"
     r"git (status|log|diff|show|rev-parse|ls-files|blame|describe|fetch)|"
     r"git branch(?!.*\s-[dDmM]\b)|"                                # listing only; -d/-D/-m/-M mutate

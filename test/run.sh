@@ -180,6 +180,22 @@ git remote -v
 kubectl get pods
 EOF
 check "gate: plain read-only commands still take the fast path" '[ "$ro_ok" = "1" ]'
+# `cd` only moves the shell: 179 of 532 judged commands were `cd X && <read-only>`.
+cd_ok=1
+while IFS= read -r c; do [ -z "$c" ] && continue; if [ "$(gate_fast "$c")" != "1" ]; then echo "      lost fast-path: $c"; cd_ok=0; fi; done <<'EOF'
+cd ~/apps/x && git status
+cd "/home/me/My Repo" && ls -la && head -5 README.md
+cd /tmp/work; grep -rn TODO .
+EOF
+check "gate: a cd before a read-only command takes the fast path" '[ "$cd_ok" = "1" ]'
+cdb_ok=1
+while IFS= read -r c; do [ -z "$c" ] && continue; if [ "$(gate_fast "$c")" != "0" ]; then echo "      still fast-path: $c"; cdb_ok=0; fi; done <<'EOF'
+cd ~/apps/x && rm -rf build
+cd $(rm -rf x) && ls
+cd /tmp && echo x > /etc/hosts
+cd ~/apps/x && git reset --hard
+EOF
+check "gate: a cd never carries a write past the fast path" '[ "$cdb_ok" = "1" ]'
 
 # verify: criteria extraction picks deliverables, not context
 crit_ok=$(python3 - <<'PYEOF'
@@ -310,6 +326,15 @@ check "dispute: marks the last SPOKEN decision, not a silent pass" '[ "$dtarget"
 st=$(JEV_HOOKS_LOG="$dl" python3 bin/stats.py)
 check "stats: reports the hooks, the spoke rate and the dispute" 'echo "$st" | grep -q "stop_check" && echo "$st" | grep -q "disputed 1"'
 check "stats: names the near-threshold band that needs tuning" 'echo "$st" | grep -q "near a threshold"'
+# Every record names the plugin version that made it, so a mixed log can be split.
+pv=$(python3 -c "import json;print(json.load(open('.claude-plugin/plugin.json'))['version'])")
+check "decision log: every decision is stamped with the plugin version" 'python3 -c "
+import json,sys
+ds=[json.loads(l) for l in open(sys.argv[1]) if json.loads(l).get(\"kind\")==\"decision\"]
+sys.exit(0 if ds and all(d.get(\"v\")==sys.argv[2] for d in ds) else 1)" "$dl" "$pv"'
+printf '%s\n' '{"t":1,"kind":"decision","hook":"bash_gate","decision":"ask","probs":{},"v":"0.0.1"}' >> "$dl"
+stv=$(JEV_HOOKS_LOG="$dl" python3 bin/stats.py --v=0.0.1)
+check "stats: --v= counts only that version's decisions" 'echo "$stv" | grep -qE "^bash_gate +1 decisions" && ! echo "$stv" | grep -q "^stop_check"'
 JEV_HOOKS_LOG=off python3 -c "
 import sys; sys.path.insert(0,'lib'); import jev
 assert jev.LOG is None, 'JEV_HOOKS_LOG=off must disable recording'

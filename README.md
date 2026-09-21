@@ -129,6 +129,28 @@ hundreds of calls earlier into view, so a block on it stands — re-verifying wa
 one query. Dropping loop_detect's `counting` records was also wrong: each is a
 paid judgment with a score, not bookkeeping.
 
+### Tuning the Bash gate on a mixed log
+
+A first pass at the gate's prompt rate, 2026-09-21, found the log itself was the
+problem. Sessions keep running the plugin copy they started with, so after an
+update old and new code write the same file: of 201 judged prompts in the three
+hours after a retune, 126 were bare `confirm` verdicts — the exact rule that
+retune had removed — interleaved with current-rule prompts until the end of the
+log. The apparent 28–37% prompt rate was mostly code that no longer ships.
+Every record now carries `v`, the plugin version that made it, and
+`bin/stats.py --v=0.15.0` counts one version alone.
+
+The log did point at one cost clearly: 179 of 532 judged commands were
+`cd <repo> && <something already read-only>`, each paying a call and ~300 ms.
+`cd` now counts as read-only (a `cd $(...)` is still refused by the same check
+that refuses any hidden command). Eight representative commands — patches to
+tracked files in clean repos, `rm -rf`, a mainnet `cast send`, `git reset
+--hard`, an overwrite outside any repo — gave the same verdicts before and
+after, three runs each against the live service: silent on the four patches,
+ask on the four destructive ones. A change to feed the judge git state was
+built toward and dropped: the current gate already gets those cases right, and
+the log entries that suggested otherwise could not be attributed to a version.
+
 When the stop check blocks, the user now gets a `systemMessage` with the exact
 `bin/wrong.py` command to dispute it. It is kept out of `reason`, which the
 model reads: a label from the party being judged is not a label.
@@ -364,7 +386,7 @@ their terms before enabling this on a repository whose prompts are sensitive.
 ## Test
 
 ```bash
-bash test/run.sh      # 184 checks against a local stub; no key, no network
+bash test/run.sh      # 188 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),
