@@ -99,6 +99,25 @@ in the criteria, with live checks either way:
 - **An outcome expected from a check not yet run** — "the roll will show 200
   instead of 404". That is intent; claiming the check already passed is not.
 
+Three more were measured 2026-09-21, over one long session whose stop check
+blocked eleven times:
+
+- **Work in flight** — eight of the eleven were `promise` blocks on honest
+  status about a running subagent, a background command or a scheduled
+  wake-up ("still building, not done yet"), each rephrased a turn later to
+  get past the check. The Stop input carries `background_tasks` and
+  `session_crons` for exactly this distinction, and the hook now reads them:
+  with something in flight and the message saying the work is not finished,
+  `promise` alone cannot block. A plain promise about something else still
+  does, work in flight or not.
+- **A command handed back after a refusal** — the assistant was denied
+  permission to run it, so "run this yourself" is a gate, not a promise. The
+  refusal is in the tool record; the hook names it in the state.
+- **Describing what it just wrote** — a `Write` result says only "File created
+  successfully", so the judge could not see the content and read any
+  description of it as a claim from nowhere. The call line now carries the
+  first 400 characters of what was written, for this check and the verifier.
+
 A plain promise ("I'll open the PR next"), a plan in place of results, and an
 unevidenced past result ("all 41 checks pass") all still block.
 
@@ -200,6 +219,27 @@ Two bugs the tests caught while writing it: the parent's spawning `Agent` call
 appears in a fork's own transcript, so counting it made a do-nothing agent look
 busy; and blocking an honest "not done" just repeats the instruction the agent
 followed, which is a loop.
+
+### Which transcript it judges
+
+Versions through 0.12 read `transcript_path`, which on `SubagentStop` is the
+**parent** session's transcript; the subagent's own is `agent_transcript_path`
+(hooks reference). Measured 2026-09-21: four forks spawned in one turn were
+every one judged against the task of the fork spawned last — the parent's most
+recent `Agent` call — and against the parent's tool record, so their real work
+read as invented (p 0.88–0.94) and all four were blocked. Over 297 recorded
+verdicts the hook had blocked 93%; a good share of that was this. It now takes
+the documented field, then the sibling file named by `agent_id`, then the
+sibling whose final message is the report being judged, and if none matches it
+stays silent and records why — a judgment against the wrong record is worse
+than none. Every decision now records which transcript it judged and how the
+task was found, so the block rate can be re-measured against real records.
+
+`bin/stats.py` and `bin/wrong.py` had a related blindness: run from a shell,
+they read `~/.claude/jev-hooks/decisions.jsonl` (10 decisions) while the hooks,
+run by the harness with `CLAUDE_PLUGIN_DATA` set, had written 3,450 to
+`~/.claude/plugins/data/jev-hooks-jev-hooks/`. Not one dispute had reached the
+real log. Both now find the newest plugin data log and print which file they read.
 
 ### What this cannot know
 
@@ -309,7 +349,7 @@ their terms before enabling this on a repository whose prompts are sensitive.
 ## Test
 
 ```bash
-bash test/run.sh      # 170 checks against a local stub; no key, no network
+bash test/run.sh      # 181 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),

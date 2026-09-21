@@ -34,6 +34,27 @@ _log_setting = os.environ.get("JEV_HOOKS_LOG")
 LOG = None if _log_setting == "off" else (_log_setting or _default_log())
 
 
+def find_log():
+    """Where to READ decisions from a shell. The hooks write under
+    CLAUDE_PLUGIN_DATA, which the harness sets and a terminal does not, so
+    bin/stats.py and bin/wrong.py were reading the legacy default: measured
+    2026-09-21, a 10-decision file, while the hooks had written 3,450 decisions
+    to ~/.claude/plugins/data/jev-hooks-jev-hooks/ - and not one dispute had
+    ever reached the real log. JEV_HOOKS_LOG wins, then CLAUDE_PLUGIN_DATA,
+    then the newest plugin data dir, then the legacy default."""
+    s = os.environ.get("JEV_HOOKS_LOG")
+    if s and s != "off":
+        return s
+    d = os.environ.get("CLAUDE_PLUGIN_DATA")
+    if d:
+        return os.path.join(d, "decisions.jsonl")
+    import glob
+    cands = glob.glob(os.path.expanduser("~/.claude/plugins/data/*jev-hooks*/decisions.jsonl"))
+    if cands:
+        return max(cands, key=os.path.getmtime)
+    return os.path.expanduser("~/.claude/jev-hooks/decisions.jsonl")
+
+
 def noul(instructions, true=None, false=None):
     q = {"type": "noul", "instructions": instructions}
     if true or false:

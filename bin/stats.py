@@ -11,17 +11,14 @@ band just either side of a threshold, where a verdict flips on wording rather
 than substance. A decision marked wrong with bin/wrong.py shows as disputed.
 """
 import json, os, sys, collections
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+import jev
 
 BANDS = (0.60, 0.80)
 
 
-def default_log():
-    d = os.environ.get("CLAUDE_PLUGIN_DATA") or os.path.expanduser("~/.claude/jev-hooks")
-    return os.path.join(d, "decisions.jsonl")
-
-
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("JEV_HOOKS_LOG") or default_log()
+    path = sys.argv[1] if len(sys.argv) > 1 else jev.find_log()
     if not os.path.exists(path):
         print(f"no decision log at {path}"); return
     by_hook = collections.defaultdict(collections.Counter)

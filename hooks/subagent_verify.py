@@ -2,11 +2,17 @@
 """SubagentStop hook. Judges the subagent's final report against the task it was
 given, so the orchestrator stops trusting a self-graded "done".
 
-Input (contract): transcript_path is the SUBAGENT's transcript; last_assistant_message
-is its final text; stop_hook_active is true when this hook already sent it back once.
+Input (contract, hooks reference 2026-09-21): transcript_path is the PARENT
+session's transcript; agent_transcript_path is the SUBAGENT's own; agent_id and
+agent_type name it; last_assistant_message is its final text; stop_hook_active is
+true when this hook already sent it back once. The subagent's transcript is
+resolved by transcript.subagent_path - the documented field first, then by
+agent_id, then by matching the report to a sibling file - and if none is found
+the hook is silent: a judgment against the parent's record is a judgment of the
+wrong agent (that is what versions <= 0.12 did, and it blocked 93% of stops).
 Output: {"decision": "block", "reason": "..."} keeps the subagent working with the
 reason as feedback. Blocks at most once per agent (stop_hook_active), and never
-when Jev is unavailable.
+when Jev is unavailable. Every decision records which transcript it judged.
 
 Criteria come from the prompt: bulleted or numbered lines, else sentences with
 "must", else the whole prompt as one criterion. Jev reads each against the report.
@@ -68,11 +74,18 @@ def main():
     if inp.get("stop_hook_active"):
         return
     report = (inp.get("last_assistant_message") or "").strip()
-    path = inp.get("transcript_path")
-    if not report and path:
+    path, how = transcript.subagent_path(inp.get("transcript_path"), inp.get("agent_transcript_path"),
+                                         inp.get("agent_id"), report)
+    prov = {"transcript": how, "agent_type": inp.get("agent_type") or None}
+    if not path:
+        jev.record("subagent_verify", "skip", None, note="no subagent transcript", **prov)
+        return
+    if not report:
         report = transcript.last_assistant_text(path)
-    prompt = transcript.task_prompt(path) if path else ""
+    prompt = transcript.task_prompt(path)
+    prov["task"] = transcript.LAST_STRATEGY
     if not report or not prompt:
+        jev.record("subagent_verify", "skip", None, note="no report" if not report else "no task", **prov)
         return
     crit = criteria_from(prompt)
     # WHAT ACTUALLY RAN. A report is a claim; these are the commands the agent
@@ -87,7 +100,7 @@ def main():
     # Nothing ran at all, yet the report claims criteria were met. No judgment
     # needed: there is no record of any work to weigh a claim against.
     if calls == 0 and crit and not DISCLAIM.search(report):
-        jev.record("subagent_verify", "block", None, criteria=len(crit), note="no_work")
+        jev.record("subagent_verify", "block", None, criteria=len(crit), note="no_work", **prov)
         print(json.dumps({"decision": "block", "reason":
             "jev-hooks verification: this agent made NO tool calls, so nothing in its transcript shows any work happened, "
             "yet the report claims the task was done. Either do the work now and report what the commands actually printed, "
@@ -121,10 +134,10 @@ def main():
     # plainly says what was NOT done — an agent that claims nothing needs no
     # evidence, and blocking it would just repeat the instruction it followed.
     if not weak and ev >= EVIDENCE_BELOW and invented < INVENTED_AT:
-        jev.record("subagent_verify", "pass", a, criteria=len(crit))
+        jev.record("subagent_verify", "pass", a, criteria=len(crit), **prov)
         return
     if honest >= HONEST_AT and invented < INVENTED_AT:
-        jev.record("subagent_verify", "pass", a, criteria=len(crit), note="disclaimed")
+        jev.record("subagent_verify", "pass", a, criteria=len(crit), note="disclaimed", **prov)
         return
     parts = []
     if weak:
@@ -135,7 +148,7 @@ def main():
         parts.append(f"the report asserts outcomes without verifiable evidence (p={ev:.2f})")
     reason = ("jev-hooks verification: " + " | ".join(parts) +
               ". Either do the missing work and report the evidence, or state plainly that it was not done and why. Do not restate the same report.")
-    jev.record("subagent_verify", "block", a, criteria=len(crit), note=f"{len(weak)} weak")
+    jev.record("subagent_verify", "block", a, criteria=len(crit), note=f"{len(weak)} weak", **prov)
     print(json.dumps({"decision": "block", "reason": reason}))
 
 
