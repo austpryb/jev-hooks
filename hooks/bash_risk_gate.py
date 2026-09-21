@@ -33,6 +33,23 @@ UNSAFE = re.compile(r"\$\(|`|-delete\b|-exec\b|-ok\b|system\(|\bxargs\b|\btee\b|
 # Redirections that only discard or merge streams are fine; any other `>` writes a file.
 HARMLESS_REDIRECT = re.compile(r"2>&1|&>\s*/dev/null|[12]?>{1,2}\s*/dev/null")
 
+# Outward-facing: it publishes, merges or deploys where other people see it, and
+# no local undo takes it back. These always ask, without a judgment call — the
+# log showed `gh pr merge` scoring 0.38-0.44 irreversible, below any threshold
+# worth setting, because nothing is destroyed on this machine. Anchored to the
+# start of a command segment so a grep that merely MENTIONS `git push` is not a
+# push. Matching here skips Jev entirely: one fewer call, and the prompt that
+# matters least deserves to depend on a judge that is up.
+OUTWARD = re.compile(
+    r"(?:^|[;&|]\s*|&&\s*|\|\|\s*)(?:sudo\s+)?("
+    r"gh\s+(?:pr\s+(?:merge|create)|release\s+create)|"
+    r"git\s+push(?!.*--dry-run)|"
+    r"terraform\s+(?:apply|destroy)|"
+    r"helm\s+(?:install|upgrade|uninstall)|"
+    r"kubectl\s+(?:apply|delete)|"
+    r"npm\s+publish|docker\s+push|wrangler\s+(?:deploy|publish)|"
+    r"make\s+roll-apply)\b")
+
 
 def is_read_only(cmd):
     """True only when EVERY segment starts with a read-only program and nothing
@@ -56,6 +73,13 @@ def main():
     if is_read_only(cmd):
         if os.environ.get("JEV_HOOKS_DEBUG"):
             sys.stderr.write("fast-path\n")
+        return
+    m = OUTWARD.search(cmd)
+    if m:
+        jev.record("bash_gate", "ask", None, command=cmd[:200], note="outward")
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
+            "permissionDecisionReason": f"jev-hooks: `{m.group(1).strip()}` publishes, merges or deploys outside this "
+                                        "machine, where no local undo reaches it. Confirm the target."}}))
         return
     state = {"command": cmd, "description": ti.get("description") or "", "cwd": inp.get("cwd") or ""}
     q = {
@@ -91,7 +115,13 @@ def main():
         decision = "deny"; reasons.append(f"could kill the running session (p={sk:.2f})")
     elif act["choice"] == "block" and act["confidence"] >= 0.6:
         decision = "deny"; reasons.append(f"reviewer verdict: block (confidence {act['confidence']:.2f})")
-    elif irr >= 0.5 or act["choice"] == "confirm" or (scope == "pattern" and irr >= 0.3):
+    # A bare "confirm" is not enough to interrupt someone. Measured over 1042
+    # logged gate decisions: `confirm` alone drove 256 of 259 prompts, most of
+    # them on heredoc edits and scratchpad writes, while only 88 carried real
+    # irreversibility — a prompt that fires on a third of all commands teaches
+    # the one hand that reads it to approve without reading. So a confirm must
+    # now come with confidence AND something actually at stake.
+    elif irr >= 0.5 or (scope == "pattern" and irr >= 0.3) or (act["choice"] == "confirm" and act["confidence"] >= 0.8 and irr >= 0.3):
         decision = "ask"; reasons.append(f"irreversible p={irr:.2f}, scope={scope}, verdict={act['choice']}")
     if not decision:
         jev.record("bash_gate", "silent", a, command=cmd[:200])

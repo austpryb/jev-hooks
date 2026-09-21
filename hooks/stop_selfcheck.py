@@ -19,24 +19,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import jev, transcript
 
 BLOCK_AT = 0.7
-RESULTS_TAIL = 30          # tool_result segments to consider
-RESULTS_CHARS = 6_000      # total budget for them; the prompt and message are small
+RESULTS_CHARS = 8_000      # budget for the call+output record; prompt and message are small
 MESSAGE_CHARS = 8_000
 
 
 def last_prompt_and_results(path):
-    prompt, results = "", []
+    """The prompt being answered, and the record of what ran since. The record
+    comes from transcript.tool_results so this check and the subagent verifier
+    weigh the same evidence: each call paired with its output, not loose
+    results that name nothing."""
+    prompt = ""
     for s in transcript.segments(path):
         if s["kind"] == "prompt" and not any(b in s["text"] for b in transcript.BOILERPLATE):
             prompt = s["text"]
-        elif s["kind"] == "tool_result":
-            results.append(s["text"])
-    tail, size = [], 0
-    for r in reversed(results[-RESULTS_TAIL:]):
-        if size + len(r) > RESULTS_CHARS:
-            break
-        tail.append(r); size += len(r)
-    return prompt, list(reversed(tail))
+    return prompt, transcript.tool_results(path, chars=RESULTS_CHARS)
 
 
 def sentence_for(check, message):

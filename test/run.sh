@@ -26,6 +26,25 @@ check "gate: warn mode downgrades deny to ask" 'echo "$out" | grep -q "\"permiss
 out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/x"}}' | TYPESAFE_BASE_URL=http://127.0.0.1:1 python3 hooks/bash_risk_gate.py)
 check "gate: Jev unreachable fails open" '[ -z "$out" ]'
 
+# A prompt that fires on a third of all commands is a prompt nobody reads
+# (2026-09-21: over 1042 logged gate decisions, a bare `confirm` verdict drove
+# 256 of 259 prompts, mostly heredoc edits and scratchpad writes, while 88 were
+# actually irreversible). A confirm now needs confidence AND something at stake.
+out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"python3 - <<PY # [irreversible=no] [action=pick:confirm]\nopen(\"test/run.sh\").read()\nPY"}}' | python3 hooks/bash_risk_gate.py)
+check "gate: a confirm with nothing at stake no longer interrupts" '[ -z "$out" ]'
+
+# Outward-facing commands ask without a judgment call: nothing local is
+# destroyed, so they score low, but no local undo reaches a merged PR either.
+before=$(wc -l < "$JEV_STUB_RECORD")
+out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"cd ~/apps/x && gh pr merge 13 --squash --delete-branch"}}' | python3 hooks/bash_risk_gate.py)
+check "gate: merging a PR always asks" 'echo "$out" | grep -q "\"permissionDecision\": \"ask\"" && echo "$out" | grep -q "publishes, merges or deploys"'
+check "gate: an outward command asks without spending a Jev call" '[ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
+out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git push --dry-run origin main"}}' | python3 hooks/bash_risk_gate.py)
+check "gate: a dry run is not a push" '! echo "$out" | grep -q "publishes, merges or deploys"'
+# Anchored to a segment start, so prose that names a push is not one.
+out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"echo \"then run git push origin main\" > /tmp/notes.txt"}}' | python3 hooks/bash_risk_gate.py)
+check "gate: a command that merely MENTIONS a push is not treated as one" '! echo "$out" | grep -q "publishes, merges or deploys"'
+
 # --- precompact triage + sessionstart reinject
 printf '%s' "{\"session_id\":\"s1\",\"transcript_path\":\"$PWD/test/fixtures/session.jsonl\",\"hook_event_name\":\"PreCompact\",\"trigger\":\"auto\"}" | python3 hooks/precompact_triage.py
 keep="$CLAUDE_PLUGIN_DATA/keep/s1.md"
@@ -73,6 +92,28 @@ done
 check "loop: fast path stays local, no judgment call (best of 3: ${best} ms)" '[ "$best" -lt 400 ]'
 check "loop: state keeps at most 6 pairs" 'for i in 1 2 3 4 5 6 7; do ld "$(ev ld1 Bash "cmd$i" out 0)" >/dev/null; done; python3 -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if len(d[\"pairs\"])==6 else 1)" "$CLAUDE_PLUGIN_DATA/loops/ld1.json"'
 rm -rf "$CLAUDE_PLUGIN_DATA/loops"
+# Three Bash calls in a row is a session, not a loop. Judging them cost 496
+# calls on the hot path of every tool use and never once struck (2026-09-21).
+before=$(wc -l < "$JEV_STUB_RECORD")
+ld "$(ev ld5 Bash 'go build ./...' 'ok' 0)" >/dev/null
+ld "$(ev ld5 Bash 'go vet ./...' 'ok' 0)" >/dev/null
+ld "$(ev ld5 Bash 'gofmt -l .' '' 0)" >/dev/null
+check "loop: three different successful calls of one tool never reach the judge" '[ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
+# The two marks worth judging: something failed, or the same call was repeated.
+before=$(wc -l < "$JEV_STUB_RECORD")
+for _ in 1 2 3; do ld "$(ev ld6 Bash 'go test ./pkg # [progress=level:1]' 'ok' 0)" >/dev/null; done
+check "loop: the SAME call repeated is judged even when it succeeds" '[ "$(wc -l < "$JEV_STUB_RECORD")" -gt "$before" ]'
+before=$(wc -l < "$JEV_STUB_RECORD")
+ld "$(ev ld7 Bash 'go build ./a # [progress=level:1]' 'ok' 0)" >/dev/null
+ld "$(ev ld7 Bash 'go build ./b # [progress=level:1]' 'ok' 0)" >/dev/null
+ld "$(ev ld7 Bash 'go build ./c # [progress=level:1]' 'undefined: Foo' 1)" >/dev/null
+check "loop: a failure among three same-tool calls is judged" '[ "$(wc -l < "$JEV_STUB_RECORD")" -gt "$before" ]'
+rm -rf "$CLAUDE_PLUGIN_DATA/loops"
+# A grep through source code is not a failing build: substring matching on
+# "error" put 88% of all tool calls into the repeat check.
+lk() { python3 -c "import sys,importlib.util;sys.path.insert(0,'lib');spec=importlib.util.spec_from_file_location('ld','hooks/loop_detect.py');m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);print(m.looks_like_error(None,sys.argv[1]))" "$1"; }
+check "loop: source code that mentions an error is not an error" '[ "$(lk "42:	if err != nil { return fmt.Errorf(\"parse error: %w\", err) }")" = "False" ]'
+check "loop: a failure at the start of a line is an error" '[ "$(lk "--- FAIL: TestX (0.01s)")" = "True" ] && [ "$(lk "fatal: not a git repository")" = "True" ]'
 o1=$(ld "$(ev ld2 Bash 'go test ./... # [progress=level:0]' 'FAIL TestX: boom' 1)")
 o2=$(ld "$(ev ld2 Bash 'go test ./... # [progress=level:0]' 'FAIL TestX: boom' 1)")
 o3=$(ld "$(ev ld2 Bash 'go test ./... # [progress=level:0]' 'FAIL TestX: boom' 1)")
@@ -554,6 +595,47 @@ L=[rec('assistant',[{'type':'tool_use','id':'a1','name':'Agent','input':{'prompt
 f=tempfile.NamedTemporaryFile('w',suffix='.jsonl',delete=False); f.write('\n'.join(L)+'\n'); f.close()
 print(transcript.tool_call_count(f.name))")
 check "verify: the parent's spawning Agent call is not counted as the child's work" '[ "$cnt" = "0" ]'
+
+# --- the work record: a call PAIRED with its output, reaching back far enough
+# (2026-09-21). Measured over 184 live subagent verdicts, 94% of them blocks:
+# results alone name nothing ("File created successfully" cites no path) and a
+# flat newest-first budget showed the judge 15 of a 108-call agent's work, so
+# anything finished early read as undone and was blocked for it.
+mkwork() { # $1=calls $2=result size -> prints a transcript path
+  python3 - "$1" "$2" <<'MKW'
+import json,sys,tempfile
+n,sz=int(sys.argv[1]),int(sys.argv[2])
+def rec(t,c): return json.dumps({"type":t,"message":{"role":t,"content":c}})
+L=[]
+for i in range(n):
+    L.append(rec("assistant",[{"type":"tool_use","id":f"t{i}","name":"Bash","input":{"command":f"go test ./pkg{i}"}}]))
+    L.append(rec("user",[{"type":"tool_result","tool_use_id":f"t{i}","content":"x"*sz+f"\nok  \tpkg{i}\t1.0s"}]))
+f=tempfile.NamedTemporaryFile("w",suffix=".jsonl",delete=False); f.write("\n".join(L)+"\n"); f.close(); print(f.name)
+MKW
+}
+mkedit() { # an Edit's RESULT never names the file; only the call does
+  python3 - <<'MKE'
+import json,tempfile
+def rec(t,c): return json.dumps({"type":t,"message":{"role":t,"content":c}})
+L=[rec("assistant",[{"type":"tool_use","id":"e1","name":"Edit","input":{"file_path":"/repo/migrations/022_evidence.sql"}}]),
+   rec("user",[{"type":"tool_result","tool_use_id":"e1","content":"File created successfully"}])]
+f=tempfile.NamedTemporaryFile("w",suffix=".jsonl",delete=False); f.write("\n".join(L)+"\n"); f.close(); print(f.name)
+MKE
+}
+rec_of() { python3 -c "import sys,json;sys.path.insert(0,'lib');import transcript;print(json.dumps(transcript.tool_results(sys.argv[1])))" "$1"; }
+
+tp=$(mkwork 3 20); out=$(rec_of "$tp"); rm -f "$tp"
+check "record: each call is paired with what it printed" 'echo "$out" | grep -q "go test ./pkg1" && echo "$out" | grep -q "pkg1.t1.0s"'
+tp=$(mkwork 120 700); out=$(rec_of "$tp"); rm -f "$tp"
+check "record: early work survives a long transcript, as a call without its output" 'echo "$out" | grep -q "go test ./pkg3"'
+# Only when even the bare call lines will not fit does the window close, and
+# then it says so, rather than letting the judge read silence as idleness.
+tp=$(mkwork 900 700); out=$(rec_of "$tp"); rm -f "$tp"
+check "record: a window too full even for call lines says how many it left out" 'echo "$out" | grep -q "earlier tool calls omitted"'
+tp=$(mkwork 1 5000); out=$(rec_of "$tp"); rm -f "$tp"
+check "record: a clipped result keeps its tail, where the verdict is" 'echo "$out" | grep -q "pkg0.t1.0s"'
+tp=$(mkedit); out=$(rec_of "$tp"); rm -f "$tp"
+check "record: a file write is attributable to the path it wrote" 'echo "$out" | grep -q "022_evidence.sql"'
 
 # The README states this number, and a number in prose drifts silently: it said
 # 111 while the suite ran 126, and the count of your own tests is the first

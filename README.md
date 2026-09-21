@@ -8,10 +8,10 @@ gate a moment it would otherwise trust itself on.
 
 | Hook | Event | What it does |
 |---|---|---|
-| `bash_risk_gate.py` | PreToolUse (Bash) | Read-only commands never reach Jev. Otherwise one call asks: irreversible? could it kill the running session? named target or a pattern? allow / confirm / block. Denies a session-killing pattern, asks on irreversible or broad ones, stays silent on the rest so the normal permission flow decides. |
+| `bash_risk_gate.py` | PreToolUse (Bash) | Read-only commands never reach Jev, and an outward-facing one (`gh pr merge`, `git push`, `terraform apply`, `helm upgrade`, `kubectl apply/delete`, `npm publish`, …) asks without one: nothing local is destroyed, so it scores low, but no local undo reaches a merged PR. Otherwise one call asks: irreversible? could it kill the running session? named target or a pattern? allow / confirm / block. Denies a session-killing pattern; asks when it is irreversible (p≥0.5), when a pattern widens it, or when a confident `confirm` meets real stakes; stays silent on the rest so the normal permission flow decides. |
 | `precompact_triage.py` + `sessionstart_reinject.py` | PreCompact, SessionStart(compact) | Before compaction, judges every user prompt and assistant conclusion: is it a decision, correction, constraint or open question a future turn must honour, and has it been superseded? Writes the keep-set; after compaction, the SessionStart hook prints it back into context. The summary still gets written by Claude; Jev decides what it must not lose. |
 | `subagent_verify.py` | SubagentStop | Reads the subagent's task and **what its tools actually did**. One yes/no per criterion asks whether the RECORD shows it, never whether the report claims it, plus a check for specifics the report cites that appear nowhere in the record. Zero tool calls with criteria claimed is blocked outright. An honest "not done" always passes. |
-| `loop_detect.py` | PostToolUse (any tool) | Keeps the last six tool calls per session. Only when the last three tool names repeat does it ask one score: same failure again, unclear, or clear progress. Three no-progress scores in a row post a system message naming the repeated tool and the last error, and tell the model to change approach. Never blocks a tool. |
+| `loop_detect.py` | PostToolUse (any tool) | Keeps the last six tool calls per session. Only when the last three tool names repeat AND one of them failed or the same call was made twice does it ask one score: same failure again, unclear, or clear progress. Three no-progress scores in a row post a system message naming the repeated tool and the last error, and tell the model to change approach. Never blocks a tool. |
 | `stop_selfcheck.py` | Stop | Reads only the final message, the last user prompt and the tail of recent tool results. Three yes/no questions in one call: does it promise work not yet done, does it fail to answer what the user last asked, does it state an outcome the tool results do not show. Any answer at or above 0.7 sends the session back once with the check named and the offending sentence quoted. |
 | `prompt_routing.py` | UserPromptSubmit | Reads the prompt alone, never the transcript. One choice says what kind of message it is (question, change request, thinking aloud, approval, other) and, when the machine lists skills, a second choice names the relevant one. Prints one line of context only when confident: a question is answered not acted on, an approval means proceed, thinking aloud gets a response not work. Change requests get nothing. Skips prompts under 12 characters, slash commands and pasted tool blocks. |
 | `edit_risk_gate.py` | PreToolUse (Edit, Write, NotebookEdit, MultiEdit) | The Bash gate reads a command; this reads a file change, and git settles most of it without a call. A clean tracked file is skipped — `git checkout --` restores it, however large the edit. A whole-file Write over uncommitted changes is asked about outright: the delta is provably gone, and a live run scored that same input 0.54 then 0.46, so it is decided as the fact it is rather than on a coin flip. Any other edit to a tracked file is skipped too. Jev is left one question, about the files no commit holds — ignored, untracked, or in no repo at all: precious, or regenerable? **Nothing from inside the file is sent** — path, git verdict and byte counts only, because the ignored file most likely to reach this point is the one most likely to hold a secret. |
@@ -289,8 +289,10 @@ judgments and are not in question. A person decides this, not an agent.
 
 The gate sends the command, its description and the cwd. Triage sends user
 prompts and assistant prose, clipped, never tool output or thinking. Verify
-sends the subagent's task and last message. The stop check sends the last user
-prompt, the final message and up to 6k chars of recent tool results. The narrowing
+sends the subagent's task, its last message and up to 16k chars of its work
+record — each tool call paired with what that call printed. The stop check
+sends the last user prompt, the final message and up to 8k chars of the same
+record. The narrowing
 gate sends the command or path, its description and the last user prompt as the goal,
 clipped to 1500 chars — never any tool output. The edit gate sends the least of
 any of them: a path, git's one-word verdict on it and three byte counts, and
@@ -303,7 +305,7 @@ their terms before enabling this on a repository whose prompts are sensitive.
 ## Test
 
 ```bash
-bash test/run.sh      # 127 checks against a local stub; no key, no network
+bash test/run.sh      # 142 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),
