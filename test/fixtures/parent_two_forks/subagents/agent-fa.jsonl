@@ -1,0 +1,6 @@
+{"type": "fork-context-ref", "agentId": "fa", "parentSessionId": "parent_two_forks"}
+{"type": "assistant", "isSidechain": true, "agentId": "fa", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "a1", "name": "Agent", "input": {"subagent_type": "fork", "prompt": "TASK A\n1. write fixtures/a.txt and show its contents"}}]}}
+{"type": "user", "isSidechain": true, "agentId": "fa", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "a1", "content": "ok"}, {"type": "text", "text": "<fork-boilerplate>\nYou are a worker fork. The transcript above is the parent's history.\n</fork-boilerplate>"}]}}
+{"type": "assistant", "isSidechain": true, "agentId": "fa", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "fixtures/a.txt", "content": "alpha"}}]}}
+{"type": "user", "isSidechain": true, "agentId": "fa", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "w1", "content": "File created successfully at: fixtures/a.txt"}]}}
+{"type": "assistant", "isSidechain": true, "agentId": "fa", "message": {"role": "assistant", "content": [{"type": "text", "text": "Wrote fixtures/a.txt containing alpha. FORK-A-REPORT [c0=yes] [evidence=yes] [honest=no] [invented=no]"}]}}

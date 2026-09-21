@@ -1,0 +1,4 @@
+{"type": "user", "message": {"role": "user", "content": "Build both halves in parallel, use forks."}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "a1", "name": "Agent", "input": {"subagent_type": "fork", "prompt": "TASK A\n1. write fixtures/a.txt and show its contents"}}, {"type": "tool_use", "id": "a2", "name": "Agent", "input": {"subagent_type": "fork", "prompt": "TASK B\n1. write fixtures/b.txt and show its contents"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "a1", "content": "Async agent launched successfully."}, {"type": "tool_result", "tool_use_id": "a2", "content": "Async agent launched successfully."}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Both forks are running."}]}}

@@ -736,6 +736,52 @@ before=$(wc -l < "$JEV_STUB_RECORD")
 out=$(mr '{"tool_name":"Agent","tool_input":{"description":"d"}}')
 check "router: a spawn with no task never reaches the judge" '[ -z "$out" ] && [ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
 
+# --- verify: the SUBAGENT's transcript, never the parent's (2026-09-21) ---------------
+# Four forks spawned in one turn were each judged against the criteria of the fork
+# spawned LAST: the hook read transcript_path, which on SubagentStop is the PARENT's
+# transcript, and took its last Agent call. The hooks reference sends the subagent's
+# own file as agent_transcript_path, and names it with agent_id.
+PT="$PWD/test/fixtures/parent_two_forks.jsonl"; FA="$PWD/test/fixtures/parent_two_forks/subagents/agent-fa.jsonl"
+FA_MSG="Wrote fixtures/a.txt containing alpha. FORK-A-REPORT [c0=yes] [evidence=yes] [honest=no] [invented=no]"
+vin() { python3 -c "
+import json,sys
+d={'transcript_path':sys.argv[1],'last_assistant_message':sys.argv[2],'stop_hook_active':False}
+for k,v in zip(sys.argv[3::2],sys.argv[4::2]): d[k]=v
+print(json.dumps(d))" "$@"; }
+before=$(wc -l < "$JEV_STUB_RECORD")
+out=$(vin "$PT" "$FA_MSG" agent_transcript_path "$FA" agent_id fa agent_type fork | python3 hooks/subagent_verify.py)
+check "verify: agent_transcript_path is the transcript judged, and its record passes" '[ -z "$out" ] && [ "$(wc -l < "$JEV_STUB_RECORD")" -gt "$before" ]'
+check "verify: the request carries the fork's OWN task, not its sibling's" 'tail -1 "$JEV_STUB_RECORD" | grep -q "TASK A" && ! tail -1 "$JEV_STUB_RECORD" | grep -q "TASK B"'
+out=$(vin "$PT" "$FA_MSG" agent_id fa | python3 hooks/subagent_verify.py)
+check "verify: without the field, agent_id finds the sibling file" '[ -z "$out" ] && tail -1 "$JEV_STUB_RECORD" | grep -q "TASK A"'
+out=$(vin "$PT" "$FA_MSG" | python3 hooks/subagent_verify.py)
+check "verify: with only the parent path, the report is matched to the transcript that ends with it" '[ -z "$out" ] && tail -1 "$JEV_STUB_RECORD" | grep -q "TASK A"'
+before=$(wc -l < "$JEV_STUB_RECORD")
+out=$(vin "$PT" "Something no fork ever said. [c0=no]" | python3 hooks/subagent_verify.py)
+check "verify: a parent transcript with no matching subagent is judged by nobody: silent, no call" '[ -z "$out" ] && [ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
+tpn=$(python3 -c "import sys;sys.path.insert(0,'lib');import transcript;print(len(transcript.task_prompt(sys.argv[1])))" "$PT")
+check "task_prompt: a parent-shaped transcript yields no task rather than its most recent spawn" '[ "$tpn" = "0" ]'
+
+# --- stop check: in-flight work the harness reports is not a promise (2026-09-21) ------
+# Eight of eight `promise` blocks in one session were honest status on a running
+# subagent, a background command or a scheduled wake-up. Stop input carries
+# background_tasks and session_crons; when they are non-empty and the message says
+# the work is not finished, that is a paused session reporting itself.
+bgin() { python3 -c "import json,sys;print(json.dumps({'transcript_path':sys.argv[1],'last_assistant_message':sys.argv[2],'stop_hook_active':False,'background_tasks':json.loads(sys.argv[3]),'session_crons':[]}))" "$sf" "$1" "$2"; }
+bg_msg="Kicked off the build in the background; it is still running, not done yet. [promise=yes] [unanswered=no] [unverified=no]"
+out=$(bgin "$bg_msg" '[{"id":"t1","type":"shell","status":"running","description":"build"}]' | python3 hooks/stop_selfcheck.py)
+check "stop check: a not-done status while background_tasks is non-empty passes" '[ -z "$out" ]'
+out=$(bgin "$bg_msg" '[]' | python3 hooks/stop_selfcheck.py)
+check "stop check: the same words with nothing in flight still block" 'echo "$out" | grep -q "\"decision\": \"block\""'
+out=$(bgin "Build is green. I'll open the PR next. [promise=yes] [unanswered=no] [unverified=no]" '[{"id":"t1","type":"shell","status":"running","description":"tail logs"}]' | python3 hooks/stop_selfcheck.py)
+check "stop check: in-flight work does not excuse a plain promise about something else" 'echo "$out" | grep -q "\"decision\": \"block\""'
+# The record shows what a Write put in the file, and that a command was refused.
+ws="$PWD/test/fixtures/write_session.jsonl"
+wsin() { python3 -c "import json,sys;print(json.dumps({'transcript_path':sys.argv[1],'last_assistant_message':sys.argv[2],'stop_hook_active':False}))" "$ws" "$1"; }
+out=$(wsin "Wrote notes.md: the finding is ALPHA-CONTENT-7731. The push was refused here, run git push yourself. [promise=no] [unanswered=no] [unverified=no]" | python3 hooks/stop_selfcheck.py)
+check "stop check: the judge is shown what the Write wrote" '[ -z "$out" ] && tail -1 "$JEV_STUB_RECORD" | grep -q "ALPHA-CONTENT-7731 is the finding"'
+check "stop check: a permission refusal in the record is named in the state" 'tail -1 "$JEV_STUB_RECORD" | grep -q "\"permission_denied\": true"'
+
 # The README states this number, and a number in prose drifts silently: it said
 # 111 while the suite ran 126, and the count of your own tests is the first
 # claim a reader checks. So the suite asserts its own README rather than

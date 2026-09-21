@@ -12,13 +12,12 @@ Hook names: bash_gate, stop_check, subagent_verify, loop_detect, triage,
 prompt_routing, narrow.
 """
 import json, os, sys, time
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+import jev
 
 
 def log_path():
-    if os.environ.get("JEV_HOOKS_LOG") and os.environ["JEV_HOOKS_LOG"] != "off":
-        return os.environ["JEV_HOOKS_LOG"]
-    d = os.environ.get("CLAUDE_PLUGIN_DATA") or os.path.expanduser("~/.claude/jev-hooks")
-    return os.path.join(d, "decisions.jsonl")
+    return jev.find_log()
 
 
 def main():
