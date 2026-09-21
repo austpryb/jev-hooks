@@ -3,8 +3,10 @@
 
 Deterministic first: the last six (tool, input, result) pairs per session are
 kept in ${CLAUDE_PLUGIN_DATA}/loops/<session_id>.json. Unless the last THREE
-tool names are identical, nothing else happens — no file beyond the append, no
-network — and that path is well under 150 ms.
+tool names are identical AND one of them errored or the same call was repeated,
+nothing else happens — no file beyond the append, no network — and that path is
+well under 150 ms. Three different, successful calls of one tool is ordinary
+work, not a loop: judging those cost 496 calls and caught nothing.
 
 On a repeat, ONE Score over exactly those three pairs:
   0 = the same failure or the same output again
@@ -81,11 +83,23 @@ def summarise_response(resp):
     return clip(resp if resp is not None else "", RESULT_CHARS)
 
 
+# A failure ANNOUNCES itself at the start of a line. Substring matching on
+# "error" or "fail" made a grep through source code look like a failing build:
+# 88% of all tool calls reached the repeat check that way, and the judgments
+# they bought caught nothing. The harness's own failure shape - a result that
+# is a plain string beginning "Error: Exit code N" - is the reliable signal.
+FAILED = __import__("re").compile(
+    r"^\s*(error\b|fatal\b|fail(ed|ure)?\b|--- FAIL|FAIL\b|panic:|Traceback|"
+    r"\w+Error:|\w+Exception|command not found|No such file|[Pp]ermission denied)",
+    __import__("re").M)
+
+
 def looks_like_error(resp, text):
     if isinstance(resp, dict) and (resp.get("is_error") or resp.get("error") or (resp.get("exit_code") not in (None, 0))):
         return True
-    t = text.lower()
-    return any(m in t for m in ("error", "fail", "panic", "traceback", "exception", "not found", "denied"))
+    if isinstance(resp, str) and resp.lstrip().startswith("Error:"):
+        return True               # Claude Code hands a FAILED tool back as a string
+    return bool(FAILED.search(text))
 
 
 def main():
@@ -112,6 +126,14 @@ def _judge(p, inp, tool):
         "error": looks_like_error(inp.get("tool_response"), rtext)}]
     last = st["pairs"][-REPEAT:]
     repeat = len(last) == REPEAT and len({x["tool"] for x in last}) == 1
+    # Three Bash calls in a row is not a loop, it is a session. Measured over
+    # 496 logged judgments: every one scored progress, none ever struck, and
+    # each cost a call on the hot path of EVERY tool use. A loop that is worth
+    # a judgment leaves one of two marks first - something failed, or the same
+    # call was made twice - and only then is it worth asking whether the
+    # repetition is going anywhere.
+    if repeat and not (any(x["error"] for x in last) or len({x["input"][:80] for x in last}) < REPEAT):
+        repeat = False
     if not repeat:
         st["strikes"] = 0
         _save(p, st)

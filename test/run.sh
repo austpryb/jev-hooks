@@ -92,6 +92,28 @@ done
 check "loop: fast path stays local, no judgment call (best of 3: ${best} ms)" '[ "$best" -lt 400 ]'
 check "loop: state keeps at most 6 pairs" 'for i in 1 2 3 4 5 6 7; do ld "$(ev ld1 Bash "cmd$i" out 0)" >/dev/null; done; python3 -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if len(d[\"pairs\"])==6 else 1)" "$CLAUDE_PLUGIN_DATA/loops/ld1.json"'
 rm -rf "$CLAUDE_PLUGIN_DATA/loops"
+# Three Bash calls in a row is a session, not a loop. Judging them cost 496
+# calls on the hot path of every tool use and never once struck (2026-09-21).
+before=$(wc -l < "$JEV_STUB_RECORD")
+ld "$(ev ld5 Bash 'go build ./...' 'ok' 0)" >/dev/null
+ld "$(ev ld5 Bash 'go vet ./...' 'ok' 0)" >/dev/null
+ld "$(ev ld5 Bash 'gofmt -l .' '' 0)" >/dev/null
+check "loop: three different successful calls of one tool never reach the judge" '[ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
+# The two marks worth judging: something failed, or the same call was repeated.
+before=$(wc -l < "$JEV_STUB_RECORD")
+for _ in 1 2 3; do ld "$(ev ld6 Bash 'go test ./pkg # [progress=level:1]' 'ok' 0)" >/dev/null; done
+check "loop: the SAME call repeated is judged even when it succeeds" '[ "$(wc -l < "$JEV_STUB_RECORD")" -gt "$before" ]'
+before=$(wc -l < "$JEV_STUB_RECORD")
+ld "$(ev ld7 Bash 'go build ./a # [progress=level:1]' 'ok' 0)" >/dev/null
+ld "$(ev ld7 Bash 'go build ./b # [progress=level:1]' 'ok' 0)" >/dev/null
+ld "$(ev ld7 Bash 'go build ./c # [progress=level:1]' 'undefined: Foo' 1)" >/dev/null
+check "loop: a failure among three same-tool calls is judged" '[ "$(wc -l < "$JEV_STUB_RECORD")" -gt "$before" ]'
+rm -rf "$CLAUDE_PLUGIN_DATA/loops"
+# A grep through source code is not a failing build: substring matching on
+# "error" put 88% of all tool calls into the repeat check.
+lk() { python3 -c "import sys,importlib.util;sys.path.insert(0,'lib');spec=importlib.util.spec_from_file_location('ld','hooks/loop_detect.py');m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);print(m.looks_like_error(None,sys.argv[1]))" "$1"; }
+check "loop: source code that mentions an error is not an error" '[ "$(lk "42:	if err != nil { return fmt.Errorf(\"parse error: %w\", err) }")" = "False" ]'
+check "loop: a failure at the start of a line is an error" '[ "$(lk "--- FAIL: TestX (0.01s)")" = "True" ] && [ "$(lk "fatal: not a git repository")" = "True" ]'
 o1=$(ld "$(ev ld2 Bash 'go test ./... # [progress=level:0]' 'FAIL TestX: boom' 1)")
 o2=$(ld "$(ev ld2 Bash 'go test ./... # [progress=level:0]' 'FAIL TestX: boom' 1)")
 o3=$(ld "$(ev ld2 Bash 'go test ./... # [progress=level:0]' 'FAIL TestX: boom' 1)")
