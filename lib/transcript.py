@@ -30,6 +30,17 @@ def _clip(s, n):
     return s if len(s) <= n else s[:n] + " …[clipped]"
 
 
+def _clip_ends(s, n):
+    """Keep a result's head AND tail. A test run says what it did first and
+    how it ended last - "ok" and "FAIL" are the final lines, so a head-only
+    clip removes the verdict the judge is looking for."""
+    s = s if isinstance(s, str) else json.dumps(s)
+    if len(s) <= n:
+        return s
+    head = int(n * 0.6)
+    return s[:head] + " …[clipped]… " + s[-(n - head):]
+
+
 def _result_text(block):
     c = block.get("content")
     if isinstance(c, list):
@@ -78,11 +89,13 @@ def segments(path):
                 elif bt == "tool_use":
                     inp = b.get("input") or {}
                     summary = inp.get("command") or inp.get("file_path") or inp.get("prompt") or inp.get("description") or json.dumps(inp)
-                    yield {"i": i, "role": "assistant", "kind": "tool_use", "text": f"{b.get('name')}: {_clip(summary, 300)}"}; i += 1
+                    yield {"i": i, "role": "assistant", "kind": "tool_use", "id": b.get("id"),
+                           "text": f"{b.get('name')}: {_clip(summary, 300)}"}; i += 1
                 elif bt == "tool_result":
                     txt = _result_text(b).strip()
                     if txt:
-                        yield {"i": i, "role": "tool", "kind": "tool_result", "text": _clip(txt, TOOL_RESULT_CHARS)}; i += 1
+                        yield {"i": i, "role": "tool", "kind": "tool_result", "id": b.get("tool_use_id"),
+                               "text": _clip_ends(txt, TOOL_RESULT_CHARS)}; i += 1
 
 
 BOILERPLATE = ("You've inherited the conversation context", "<fork-boilerplate>", "You are a worker fork")
@@ -187,22 +200,77 @@ def _log_strategy(name):
         pass
 
 
-def tool_results(path, tail=30, chars=6000):
-    """The most recent tool results from a transcript, newest-bounded.
+def tool_results(path, chars=16_000, result_chars=400):
+    """What an agent ACTUALLY did: each call PAIRED with what it printed, oldest
+    call first, as "Bash: go test ./...\n-> ok  pkg  1.2s".
 
-    This is the only record of what an agent ACTUALLY did. A report is a
-    claim; these are the commands that ran and what they printed. Shared by
-    the stop check and the subagent verifier so the two cannot drift: both
-    judge a claim against this, never against the claim's own prose.
+    A report is a claim; these are the commands that ran and their output.
+    Shared by the stop check and the subagent verifier so the two cannot drift:
+    both judge a claim against this, never against the claim's own prose.
+
+    Two things this must get right, both learned from live misjudgments
+    (measured 2026-09-21 over 184 subagent verdicts, 94% of them blocks):
+
+      Pairing. Results alone are unattributable - "File created successfully"
+      names no file the criterion could match, and the judge, told to weigh the
+      record, honestly answered that the record showed nothing. The call is
+      what carries the path, the command and the test name.
+
+      Reach. A flat newest-first byte budget spent itself on the last few
+      results and dropped the early work entirely: for a 108-call agent the
+      judge saw 15 calls, so any criterion finished early read as undone. Work
+      that does not fit keeps its CALL line and drops its output - a header
+      costs ~60 chars and still says the file was written - and only when even
+      that will not fit does the window close, with a line saying how many
+      earlier calls it left out.
     """
-    results = [s["text"] for s in segments(path) if s["kind"] == "tool_result"]
-    out, size = [], 0
-    for r in reversed(results[-tail:]):
-        if size + len(r) > chars:
-            break
-        out.append(r)
-        size += len(r)
-    return list(reversed(out))
+    pending, entries = {}, []
+    for s in segments(path):
+        if s["kind"] == "tool_use":
+            pending[s.get("id")] = len(entries)
+            entries.append([s["text"], ""])
+        elif s["kind"] == "tool_result":
+            idx = pending.pop(s.get("id"), None)
+            if idx is None:
+                entries.append(["", s["text"]])       # result with no call in view
+            else:
+                entries[idx][1] = s["text"]
+    # Reserve the call lines FIRST, then spend what is left on output, newest
+    # first. Spending in one newest-first pass looks fine until a long agent:
+    # the newest ~35 results eat the whole budget and every earlier call
+    # vanishes, which is exactly how work finished early came to read as never
+    # done. A call line is ~60 chars and still says the file was written.
+    heads = [_clip(call, 300) if call else "" for call, _ in entries]
+    reserve = sum(len(h) for h in heads)
+    dropped = 0
+    if reserve > chars // 2:      # too many calls to name them in full: shorten,
+        heads = [_clip(h, 140) if h else "" for h in heads]   # then keep the newest
+        reserve = sum(len(h) for h in heads)
+    if reserve > chars // 2:
+        keep, size = 0, 0
+        for h in reversed(heads):
+            if size + len(h) > chars // 2:
+                break
+            keep += 1; size += len(h)
+        dropped = len(entries) - keep
+        entries, heads = entries[-keep:], heads[-keep:]
+        reserve = size
+    budget = chars - reserve
+    bodies = [""] * len(entries)
+    for i in range(len(entries) - 1, -1, -1):
+        res = entries[i][1]
+        if not res:
+            continue
+        body = _clip_ends(res, result_chars)
+        if len(body) + 4 <= budget:
+            bodies[i] = body; budget -= len(body) + 4
+    out = []
+    for i, (call, res) in enumerate(entries):
+        head = heads[i]
+        out.append(f"{head}\n-> {bodies[i]}" if head and bodies[i] else (head or bodies[i] or res[:140]))
+    if dropped:
+        out.insert(0, f"…{dropped} earlier tool calls omitted (window full)")
+    return out
 
 
 def tool_call_count(path, exclude=("Agent",)):

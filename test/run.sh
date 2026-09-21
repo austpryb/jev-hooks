@@ -555,6 +555,47 @@ f=tempfile.NamedTemporaryFile('w',suffix='.jsonl',delete=False); f.write('\n'.jo
 print(transcript.tool_call_count(f.name))")
 check "verify: the parent's spawning Agent call is not counted as the child's work" '[ "$cnt" = "0" ]'
 
+# --- the work record: a call PAIRED with its output, reaching back far enough
+# (2026-09-21). Measured over 184 live subagent verdicts, 94% of them blocks:
+# results alone name nothing ("File created successfully" cites no path) and a
+# flat newest-first budget showed the judge 15 of a 108-call agent's work, so
+# anything finished early read as undone and was blocked for it.
+mkwork() { # $1=calls $2=result size -> prints a transcript path
+  python3 - "$1" "$2" <<'MKW'
+import json,sys,tempfile
+n,sz=int(sys.argv[1]),int(sys.argv[2])
+def rec(t,c): return json.dumps({"type":t,"message":{"role":t,"content":c}})
+L=[]
+for i in range(n):
+    L.append(rec("assistant",[{"type":"tool_use","id":f"t{i}","name":"Bash","input":{"command":f"go test ./pkg{i}"}}]))
+    L.append(rec("user",[{"type":"tool_result","tool_use_id":f"t{i}","content":"x"*sz+f"\nok  \tpkg{i}\t1.0s"}]))
+f=tempfile.NamedTemporaryFile("w",suffix=".jsonl",delete=False); f.write("\n".join(L)+"\n"); f.close(); print(f.name)
+MKW
+}
+mkedit() { # an Edit's RESULT never names the file; only the call does
+  python3 - <<'MKE'
+import json,tempfile
+def rec(t,c): return json.dumps({"type":t,"message":{"role":t,"content":c}})
+L=[rec("assistant",[{"type":"tool_use","id":"e1","name":"Edit","input":{"file_path":"/repo/migrations/022_evidence.sql"}}]),
+   rec("user",[{"type":"tool_result","tool_use_id":"e1","content":"File created successfully"}])]
+f=tempfile.NamedTemporaryFile("w",suffix=".jsonl",delete=False); f.write("\n".join(L)+"\n"); f.close(); print(f.name)
+MKE
+}
+rec_of() { python3 -c "import sys,json;sys.path.insert(0,'lib');import transcript;print(json.dumps(transcript.tool_results(sys.argv[1])))" "$1"; }
+
+tp=$(mkwork 3 20); out=$(rec_of "$tp"); rm -f "$tp"
+check "record: each call is paired with what it printed" 'echo "$out" | grep -q "go test ./pkg1" && echo "$out" | grep -q "pkg1.t1.0s"'
+tp=$(mkwork 120 700); out=$(rec_of "$tp"); rm -f "$tp"
+check "record: early work survives a long transcript, as a call without its output" 'echo "$out" | grep -q "go test ./pkg3"'
+# Only when even the bare call lines will not fit does the window close, and
+# then it says so, rather than letting the judge read silence as idleness.
+tp=$(mkwork 900 700); out=$(rec_of "$tp"); rm -f "$tp"
+check "record: a window too full even for call lines says how many it left out" 'echo "$out" | grep -q "earlier tool calls omitted"'
+tp=$(mkwork 1 5000); out=$(rec_of "$tp"); rm -f "$tp"
+check "record: a clipped result keeps its tail, where the verdict is" 'echo "$out" | grep -q "pkg0.t1.0s"'
+tp=$(mkedit); out=$(rec_of "$tp"); rm -f "$tp"
+check "record: a file write is attributable to the path it wrote" 'echo "$out" | grep -q "022_evidence.sql"'
+
 # The README states this number, and a number in prose drifts silently: it said
 # 111 while the suite ran 126, and the count of your own tests is the first
 # claim a reader checks. So the suite asserts its own README rather than

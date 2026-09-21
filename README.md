@@ -289,8 +289,10 @@ judgments and are not in question. A person decides this, not an agent.
 
 The gate sends the command, its description and the cwd. Triage sends user
 prompts and assistant prose, clipped, never tool output or thinking. Verify
-sends the subagent's task and last message. The stop check sends the last user
-prompt, the final message and up to 6k chars of recent tool results. The narrowing
+sends the subagent's task, its last message and up to 16k chars of its work
+record — each tool call paired with what that call printed. The stop check
+sends the last user prompt, the final message and up to 8k chars of the same
+record. The narrowing
 gate sends the command or path, its description and the last user prompt as the goal,
 clipped to 1500 chars — never any tool output. The edit gate sends the least of
 any of them: a path, git's one-word verdict on it and three byte counts, and
@@ -303,7 +305,7 @@ their terms before enabling this on a repository whose prompts are sensitive.
 ## Test
 
 ```bash
-bash test/run.sh      # 127 checks against a local stub; no key, no network
+bash test/run.sh      # 132 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),
