@@ -14,7 +14,7 @@ gate a moment it would otherwise trust itself on.
 | `loop_detect.py` | PostToolUse (any tool) | Keeps the last six tool calls per session. Only when the last three tool names repeat AND one of them failed or the same call was made twice does it ask one score: same failure again, unclear, or clear progress. Three no-progress scores in a row post a system message naming the repeated tool and the last error, and tell the model to change approach. Never blocks a tool. |
 | `stop_selfcheck.py` | Stop | Reads only the final message, the last user prompt and the tail of recent tool results. Three yes/no questions in one call: does it promise work not yet done, does it fail to answer what the user last asked, does it state an outcome the tool results do not show. Any answer at or above 0.7 sends the session back once with the check named and the offending sentence quoted. |
 | `model_router.py` | PreToolUse (Agent) | Picks the model a SUBAGENT runs on: one choice over the subagent's task routes a grep to haiku, a summary to sonnet, a failing test to opus and a design question to fable. Writes only `updatedInput`, never a permission. Leaves a model the caller named alone (`JEV_HOOKS_ROUTER_FORCE=1` overrides). When no single pick is clear but the task is plainly cheap, it still routes cheap — declining sends the spawn to the parent's model, the expensive one. |
-| `prompt_routing.py` | UserPromptSubmit | Reads the prompt alone, never the transcript. One choice says what kind of message it is (question, change request, thinking aloud, approval, other) and, when the machine lists skills, a second choice names the relevant one. Prints one line of context only when confident: a question is answered not acted on, an approval means proceed, thinking aloud gets a response not work. Change requests get nothing. Skips prompts under 12 characters, slash commands and pasted tool blocks. |
+| `prompt_routing.py` | UserPromptSubmit | Reads the prompt alone, never the transcript. One choice says what kind of message it is (question, change request, thinking aloud, approval, other) and, when the machine lists skills, a second choice names the relevant one. A third says which model suits the work, and when that is not the model running the session — read from the transcript, the only place it is written down — the line names it: a hook cannot switch the session's model, so it says `/model fable` and stops. The same advice is never repeated to a session twice, and `haiku` is not offered for a whole session by default. Prints one line of context only when confident: a question is answered not acted on, an approval means proceed, thinking aloud gets a response not work. Change requests get nothing. Skips prompts under 12 characters, slash commands and pasted tool blocks. |
 | `edit_risk_gate.py` | PreToolUse (Edit, Write, NotebookEdit, MultiEdit) | The Bash gate reads a command; this reads a file change, and git settles most of it without a call. A clean tracked file is skipped — `git checkout --` restores it, however large the edit. A whole-file Write over uncommitted changes is asked about outright: the delta is provably gone, and a live run scored that same input 0.54 then 0.46, so it is decided as the fact it is rather than on a coin flip. Any other edit to a tracked file is skipped too. Jev is left one question, about the files no commit holds — ignored, untracked, or in no repo at all: precious, or regenerable? **Nothing from inside the file is sent** — path, git verdict and byte counts only, because the ignored file most likely to reach this point is the one most likely to hold a secret. |
 | `narrow_output.py` | PreToolUse (Bash, Read, Grep) | Judges output **before** it enters context. A command that already limits itself, one with no command or path, and anything not provably read-only never reach Jev. Otherwise one call over the command and the last user prompt asks: is this far more output than the goal needs, does the goal need all of it, and which end carries the answer. Only when bulky ≥ 0.7 and needs_all < 0.3 does it append `| head -200` / `| tail -200` (Read gets `limit`, Grep `head_limit`). It only ever appends a limiter — never a path, a pattern or a flag's value — and the rewrite prints a marker saying what was cut. |
 
@@ -290,7 +290,9 @@ judgments and are not in question. A person decides this, not an agent.
 
 The gate sends the command, its description and the cwd. Triage sends user
 prompts and assistant prose, clipped, never tool output or thinking. The model router sends the subagent's task, its
-description and its agent type — never the parent's transcript. Verify
+description and its agent type — never the parent's transcript. The session-model
+hint sends the prompt it was already sending; the model it compares against is
+read locally from the transcript and never leaves the machine. Verify
 sends the subagent's task, its last message and up to 16k chars of its work
 record — each tool call paired with what that call printed. The stop check
 sends the last user prompt, the final message and up to 8k chars of the same
@@ -307,7 +309,7 @@ their terms before enabling this on a repository whose prompts are sensitive.
 ## Test
 
 ```bash
-bash test/run.sh      # 159 checks against a local stub; no key, no network
+bash test/run.sh      # 170 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),
