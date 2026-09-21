@@ -637,6 +637,62 @@ check "record: a clipped result keeps its tail, where the verdict is" 'echo "$ou
 tp=$(mkedit); out=$(rec_of "$tp"); rm -f "$tp"
 check "record: a file write is attributable to the path it wrote" 'echo "$out" | grep -q "022_evidence.sql"'
 
+
+# --- model router (hooks/model_router.py)
+# A hook cannot change the SESSION's model - no hook event carries one. A
+# subagent's it can: the Agent tool takes `model`, a per-invocation model beats
+# the definition and CLAUDE_CODE_SUBAGENT_MODEL, and PreToolUse `updatedInput`
+# rewrites tool input. Verified live 2026-09-21: a spawn asking for opus,
+# rewritten by a probe hook, ran on claude-haiku-4-5 per the subagent
+# transcript's own message.model.
+mr() { printf '%s' "$1" | python3 hooks/model_router.py; }
+agent() { extra="${2:-}"; [ -z "$extra" ] && extra='{}'
+  python3 -c 'import json,sys;i={"tool_name":"Agent","tool_input":{"prompt":sys.argv[1],"description":"d","subagent_type":"general-purpose"}};i["tool_input"].update(json.loads(sys.argv[2]));print(json.dumps(i))' "$1" "$extra"; }
+
+out=$(mr "$(agent 'Find every call site of rankedFrontier and list the files. [model=pick:haiku]')")
+check "router: a lookup is routed to a cheap model" 'echo "$out" | grep -q "\"model\": \"haiku\"" && echo "$out" | grep -q updatedInput'
+check "router: routing rewrites input only, never a permission" '! echo "$out" | grep -q permissionDecision'
+check "router: the rewritten input keeps the rest of the spawn intact" 'echo "$out" | grep -q "\"subagent_type\": \"general-purpose\"" && echo "$out" | grep -q "\"prompt\":"'
+check "router: the user is told where the subagent went" 'echo "$out" | grep -q "systemMessage" && echo "$out" | grep -q "routing this subagent to haiku"'
+
+out=$(mr "$(agent 'Make TestRejudge pass; it fails on a nil map in the worker. [model=pick:opus]')")
+check "router: implementation work is routed to the strong model" 'echo "$out" | grep -q "\"model\": \"opus\""'
+
+# An explicit model is a deliberate choice by the caller.
+out=$(mr "$(agent 'Find the file. [model=pick:haiku]' '{"model":"opus"}')")
+check "router: a model the caller named is left alone" '[ -z "$out" ]'
+out=$(JEV_HOOKS_ROUTER_FORCE=1 mr "$(agent 'Find the file. [model=pick:haiku]' '{"model":"opus"}')")
+check "router: FORCE overrides the caller's model" 'echo "$out" | grep -q "\"model\": \"haiku\""'
+out=$(mr "$(agent 'Find the file. [model=pick:haiku]' '{"model":"inherit"}')")
+check "router: inherit is not a deliberate choice" 'echo "$out" | grep -q "\"model\": \"haiku\""'
+
+# Every way of not being sure leaves the spawn exactly as it was.
+out=$(JEV_HOOKS_ROUTER_MIN=0.99 JEV_HOOKS_ROUTER_TIER=0.99 mr "$(agent 'Find the file. [model=pick:haiku]')")
+check "router: an unconfident pick changes nothing" '[ -z "$out" ]'
+# Declining is NOT neutral: an untouched spawn inherits the parent's model, the
+# expensive one. Measured live: "list the files here" split haiku 0.52 / sonnet
+# 0.48 — not doubt that the task is cheap, only which cheap model does it.
+ch() { python3 -c "
+import importlib.util,sys,json; sys.path.insert(0,'lib')
+spec=importlib.util.spec_from_file_location('mr','hooks/model_router.py'); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(m.choose(json.loads(sys.argv[1]), ['haiku','sonnet','opus','fable'], 0.5, 0.7))" "$1"; }
+check "router: a split between two cheap models still routes cheap" '[ "$(ch "{\"haiku\":0.52,\"sonnet\":0.48}")" = "haiku" ] && [ "$(ch "{\"haiku\":0.45,\"sonnet\":0.40,\"opus\":0.15}")" = "haiku" ]'
+check "router: a split between two expensive models leaves the spawn alone" '[ "$(ch "{\"opus\":0.45,\"fable\":0.40,\"haiku\":0.15}")" = "None" ]'
+check "router: a clear single pick wins outright" '[ "$(ch "{\"opus\":0.9,\"sonnet\":0.1}")" = "opus" ]'
+out=$(JEV_HOOKS_ROUTER_MODELS=sonnet,opus mr "$(agent 'Find the file. [model=pick:haiku]')")
+# The steer string lives in the prompt, which is echoed back inside updatedInput:
+# assert on the MODEL field, not on the presence of the word anywhere.
+check "router: a model outside the allowed set is never chosen" 'echo "$out" | grep -q "\"model\": \"sonnet\"" && ! echo "$out" | grep -q "\"model\": \"haiku\""'
+out=$(JEV_HOOKS_ROUTER=off mr "$(agent 'Find the file. [model=pick:haiku]')")
+check "router: the off switch is silent" '[ -z "$out" ]'
+out=$(TYPESAFE_BASE_URL=http://127.0.0.1:1 mr "$(agent 'Find the file. [model=pick:haiku]')")
+check "router: judge unreachable fails open" '[ -z "$out" ]'
+out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"ls"}}' | python3 hooks/model_router.py)
+check "router: another tool is not an Agent spawn" '[ -z "$out" ]'
+before=$(wc -l < "$JEV_STUB_RECORD")
+out=$(mr '{"tool_name":"Agent","tool_input":{"description":"d"}}')
+check "router: a spawn with no task never reaches the judge" '[ -z "$out" ] && [ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
+
 # The README states this number, and a number in prose drifts silently: it said
 # 111 while the suite ran 126, and the count of your own tests is the first
 # claim a reader checks. So the suite asserts its own README rather than
