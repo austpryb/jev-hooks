@@ -68,7 +68,8 @@ def last_prompt_and_results(path):
     results that name nothing."""
     prompt = ""
     for s in transcript.segments(path):
-        if s["kind"] == "prompt" and not any(b in s["text"] for b in transcript.BOILERPLATE):
+        if s["kind"] == "prompt" and not any(b in s["text"] for b in transcript.BOILERPLATE) \
+                and not transcript.is_harness_prompt(s["text"]):
             prompt = s["text"]
     return prompt, transcript.tool_results(path, chars=RESULTS_CHARS)
 
@@ -156,7 +157,15 @@ def main():
     reason = ("jev-hooks stop check: " + " | ".join(parts) +
               ". Do the promised work now, answer the question, or show the evidence — or say plainly that it was not done and why. Do not repeat the same message.")
     jev.record("stop_check", "block", a, note=", ".join(k for k, _ in failed), in_flight=len(bg) or None)
-    print(json.dumps({"decision": "block", "reason": reason}))
+    # The dispute command goes to the USER (systemMessage), never into `reason`,
+    # which the model reads: a model told how to dispute its own blocks would
+    # label them, and a label from the party being judged is not a label. Zero
+    # disputes had ever been recorded (2026-09-22), largely because the command
+    # was only in the README.
+    wrong = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "wrong.py"))
+    print(json.dumps({"decision": "block", "reason": reason,
+                      "systemMessage": f"jev-hooks blocked ({', '.join(k for k, _ in failed)}). "
+                                       f"If that was wrong: python3 {wrong} stop_check \"why\""}))
 
 
 if __name__ == "__main__":
