@@ -638,6 +638,49 @@ tp=$(mkedit); out=$(rec_of "$tp"); rm -f "$tp"
 check "record: a file write is attributable to the path it wrote" 'echo "$out" | grep -q "022_evidence.sql"'
 
 
+
+# --- session-model hint (prompt_routing)
+# A hook cannot change the session's model, so this says so once and stops. It
+# rides on the call prompt_routing already makes: one more question, no extra
+# round trip.
+mktx() { # $1=model id -> a transcript whose last assistant turn ran on it
+  python3 -c 'import json,sys,tempfile
+f=tempfile.NamedTemporaryFile("w",suffix=".jsonl",delete=False)
+f.write(json.dumps({"type":"assistant","message":{"role":"assistant","model":sys.argv[1],"content":[{"type":"text","text":"ok"}]}})+"\n"); f.close(); print(f.name)' "$1"
+}
+pr_in() { python3 -c 'import json,sys;print(json.dumps({"prompt":sys.argv[1],"transcript_path":sys.argv[2],"session_id":sys.argv[3],"cwd":"/tmp/nowhere"}))' "$1" "$2" "$3"; }
+pr() { printf '%s' "$1" | python3 hooks/prompt_routing.py; }
+
+TX=$(mktx claude-opus-5)
+out=$(pr "$(pr_in 'Compare the two designs for the evidence pipeline and recommend one. [kind=pick:question] [model=pick:fable]' "$TX" h1)")
+check "hint: a design prompt on opus suggests the design model" 'echo "$out" | grep -q "/model fable" && echo "$out" | grep -q "opus is running it"'
+check "hint: the suggestion carries its probability" 'echo "$out" | grep -qE "p=0\.[0-9]+"'
+out=$(pr "$(pr_in 'Compare the two designs for the evidence pipeline and recommend one. [kind=pick:question] [model=pick:fable]' "$TX" h1)")
+check "hint: the same advice is not repeated to the same session" '! echo "$out" | grep -q "/model"'
+out=$(pr "$(pr_in 'Make the failing worker test pass. [kind=pick:change_request] [model=pick:opus]' "$TX" h2)")
+check "hint: silent when the running model already fits" '! echo "$out" | grep -q "/model"'
+
+# haiku is a decision worth typing, not one worth being nudged into. The router
+# already sends cheap FORKS there without anyone typing anything.
+before=$(wc -l < "$JEV_STUB_RECORD")
+out=$(pr "$(pr_in 'Extract the PR number from this line. [model=pick:haiku]' "$TX" h3)")
+check "hint: haiku is not offered for the session by default" '! echo "$out" | grep -q "/model haiku"'
+check "hint: the model question is not sent with haiku among the options" '! tail -n +$((before+1)) "$JEV_STUB_RECORD" | grep -q "reformat something short"'
+out=$(JEV_HOOKS_HINT_MODELS=opus,haiku pr "$(pr_in 'Extract the PR number from this line. [model=pick:haiku]' "$TX" h4)")
+check "hint: an explicit model set is honoured" 'echo "$out" | grep -q "/model haiku"'
+
+out=$(JEV_HOOKS_HINT=off pr "$(pr_in 'Compare the two designs and recommend one. [model=pick:fable]' "$TX" h5)")
+check "hint: the off switch is silent" '! echo "$out" | grep -q "/model"'
+out=$(JEV_HOOKS_HINT_MIN=0.99 pr "$(pr_in 'Compare the two designs and recommend one. [model=pick:fable]' "$TX" h6)")
+check "hint: an unconfident pick says nothing" '! echo "$out" | grep -q "/model"'
+before=$(wc -l < "$JEV_STUB_RECORD")
+out=$(pr "$(pr_in 'Compare the two designs and recommend one. [model=pick:fable]' /nonexistent/transcript.jsonl h7)")
+check "hint: an unreadable transcript means no advice, not a guess" '! echo "$out" | grep -q "/model"'
+TXU=$(mktx some-other-vendor-model-3)
+out=$(pr "$(pr_in 'Compare the two designs and recommend one. [model=pick:fable]' "$TXU" h8)")
+check "hint: an unrecognised model is never reasoned about" '! echo "$out" | grep -q "/model"'
+rm -f "$TX" "$TXU"
+
 # --- model router (hooks/model_router.py)
 # A hook cannot change the SESSION's model - no hook event carries one. A
 # subagent's it can: the Agent tool takes `model`, a per-invocation model beats

@@ -13,12 +13,23 @@ Fails open on everything else: no key, timeout, bad JSON -> silence.
 """
 import json, os, re, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
-import jev
+import jev, models, transcript
 
 MIN_CHARS = 12
 CONFIDENCE = 0.7
 MAX_SKILLS = 100
 PROMPT_CHARS = 4_000
+
+# The session's own model is the one thing a hook cannot change: no hook event
+# carries a model field, and `/model` is the only mid-session switch. So this
+# says so and stops. It rides on the call this hook already makes — one more
+# question, no extra round trip.
+#
+# haiku is not offered by default. Driving a whole session on it is a decision
+# worth typing, not one worth being nudged into; the router already sends the
+# cheap FORKS there without anyone typing anything.
+HINT_MODELS = ("opus", "fable", "sonnet")
+HINT_MIN = 0.7           # advice interrupts a human: be surer than the router is
 
 HINTS = {
     "question": "jev-hooks: this reads as a question — answer and report; do not change files unless asked.",
@@ -62,6 +73,29 @@ def skill_names(cwd):
     return sorted(names)
 
 
+def repeated(sid, want):
+    """True when this session was already told to switch to `want` and has not
+    been told anything else since. Advice repeated every prompt is noise, and
+    the second telling never persuades anyone the first did not. Any failure
+    here counts as 'not repeated': the hint is cheap, losing it is fine."""
+    d = os.environ.get("CLAUDE_PLUGIN_DATA") or os.path.expanduser("~/.claude/jev-hooks")
+    d = os.path.join(d, "model_hint")
+    try:
+        os.makedirs(d, exist_ok=True)
+        jev.prune(d)
+        p = os.path.join(d, f"{jev.safe_id(sid or 'unknown')}.json")
+        try:
+            last = json.load(open(p)).get("last")
+        except Exception:
+            last = None
+        if last == want:
+            return True
+        json.dump({"last": want}, open(p, "w"))
+    except Exception:
+        return False
+    return False
+
+
 def main():
     t0 = time.time()
     inp = jev.read_stdin()
@@ -84,6 +118,14 @@ def main():
                 "other": "greetings, status pings like 'keep going', pasted logs, anything that fits none of the above",
             }),
     }
+    hint_models = [m for m in os.environ.get("JEV_HOOKS_HINT_MODELS", ",".join(HINT_MODELS)).split(",")
+                   if m.strip() in models.CRITERIA]
+    current = models.alias_of(transcript.last_model(inp.get("transcript_path") or ""))
+    if current and len(hint_models) > 1 and os.environ.get("JEV_HOOKS_HINT", "").lower() not in ("off", "0", "false"):
+        q["model"] = jev.choice(
+            "Which model should answer `prompt`? Judge the WORK it asks for, not how long the text is: a short "
+            "sentence can ask for a hard change, and a long brief can ask for a file listing.",
+            {m: models.CRITERIA[m] for m in hint_models})
     skills = skill_names(inp.get("cwd"))
     if skills:
         crit = {n: None for n in skills}
@@ -99,6 +141,12 @@ def main():
     s = a.get("skill") or {}
     if s and s.get("choice") and s["choice"] != "none" and float(s.get("confidence") or 0) >= CONFIDENCE:
         parts.append(f"Relevant skill: {s['choice']}.")
+    if a.get("model"):
+        probs = models.probabilities(a["model"])
+        want = models.choose(probs, hint_models, models.envfloat("JEV_HOOKS_HINT_MIN", HINT_MIN), 1.1)
+        if want and want != current and not repeated(inp.get("session_id"), want):
+            parts.append(f"This reads as {models.CRITERIA[want].split(':')[0]} — {current} is running it; "
+                         f"`/model {want}` fits better (p={float(probs.get(want) or 0):.2f}).")
     debug(f"ms={int((time.time() - t0) * 1000)} kind={k.get('choice')}:{k.get('confidence')} skill={s.get('choice')}:{s.get('confidence')}")
     if parts:
         jev.record("prompt_routing", "hint", a, note=" ".join(parts)[:160])

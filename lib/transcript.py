@@ -121,6 +121,27 @@ def last_assistant_text(path):
     return last
 
 
+def last_model(path):
+    """The model id of the most recent assistant turn, e.g.
+    'claude-opus-5'. A hook is told the session id and the transcript path but
+    never the model, and the transcript is the only place it is written down."""
+    found = ""
+    try:
+        with open(path) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                if r.get("type") == "assistant":
+                    m = (r.get("message") or {}).get("model")
+                    if m:
+                        found = m
+    except Exception:
+        pass
+    return found
+
+
 def batches(segs, max_chars):
     """Group segments so each batch's text fits one Jev request's state budget."""
     cur, size = [], 0

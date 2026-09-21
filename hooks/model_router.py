@@ -35,53 +35,15 @@ import jev
 PROMPT_CHARS = 4_000
 DEFAULT_MODELS = ("haiku", "sonnet", "opus", "fable")
 
-# What each model is FOR, in the terms the task itself is written in. These are
-# read by the judge, so they describe the work, never the model's marketing.
-CRITERIA = {
-    "opus": "implementation and debugging in a real repository: write or change code, make a failing test pass, "
-            "work through a multi-step change where a wrong step is expensive to unwind",
-    "fable": "planning, design and judgment about a system: compare approaches, weigh tradeoffs, review a decision, "
-             "write a spec, a plan or prose explaining how something should work",
-    "sonnet": "mechanical work on this machine: gather context, search a codebase, summarise what exists, run known "
-              "commands, edit config, follow a procedure that is already decided",
-    "haiku": "a small lookup or transformation where a mistake is obvious and cheap: find a file, list values, "
-             "extract a field, reformat something short",
-}
-
-
-# Declining is not neutral. A spawn this hook leaves alone inherits the PARENT's
-# model, which is the expensive one — so "unsure" must not mean "use Opus".
-# Measured against the live judge 2026-09-21: "list the files in this directory"
-# split haiku 0.52 / sonnet 0.48. The judge was not unsure whether the task was
-# cheap; it was unsure WHICH cheap model. That is still an answer.
-CHEAP = ("haiku", "sonnet")
-
-
-def choose(probs, models, floor, tier):
-    """The model to route to, or None to leave the spawn alone."""
-    ranked = sorted(((m, float(p)) for m, p in (probs or {}).items() if m in models), key=lambda kv: -kv[1])
-    if not ranked:
-        return None
-    top, top_p = ranked[0]
-    if top_p >= floor:
-        return top
-    cheap = [(m, p) for m, p in ranked if m in CHEAP]
-    if sum(p for _, p in cheap) >= tier:
-        return cheap[0][0]        # sure it is cheap, unsure which: take the likelier
-    return None
+# One definition of what each model is for, shared with the session-model hint
+# in prompt_routing so the two cannot drift.
+from models import CRITERIA, CHEAP, choose, envfloat, probabilities   # noqa: E402
 
 
 def allowed():
     raw = os.environ.get("JEV_HOOKS_ROUTER_MODELS")
     names = [m.strip() for m in raw.split(",")] if raw else list(DEFAULT_MODELS)
     return [m for m in names if m in CRITERIA]
-
-
-def envfloat(name, default):
-    try:
-        return float(os.environ.get(name, default))
-    except ValueError:
-        return default
 
 
 def debug(msg):
@@ -114,8 +76,7 @@ def main():
         {m: CRITERIA[m] for m in models})}, retries=0)
     if not a:
         return                       # judge unavailable: the spawn is untouched
-    ans = a.get("model") or {}
-    probs = ans.get("probabilities") or ({ans.get("choice"): 1.0} if ans.get("choice") else {})
+    probs = probabilities(a.get("model"))
     floor, tier = envfloat("JEV_HOOKS_ROUTER_MIN", 0.5), envfloat("JEV_HOOKS_ROUTER_TIER", 0.7)
     pick = choose(probs, models, floor, tier)
     conf = float(probs.get(pick) or 0)
