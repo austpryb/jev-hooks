@@ -784,6 +784,12 @@ check "verify: with only the parent path, the report is matched to the transcrip
 before=$(wc -l < "$JEV_STUB_RECORD")
 out=$(vin "$PT" "Something no fork ever said. [c0=no]" | python3 hooks/subagent_verify.py)
 check "verify: a parent transcript with no matching subagent is judged by nobody: silent, no call" '[ -z "$out" ] && [ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
+# SubagentStop with no agent_transcript_path and no agent_type, handing over a MAIN
+# session's transcript (2026-09-21): nothing in it is a subagent's task.
+MS="$PWD/test/fixtures/main_session.jsonl"
+before=$(wc -l < "$JEV_STUB_RECORD")
+out=$(vin "$MS" "Some subagent report. [c0=no] [c1=no] [c2=no]" | python3 hooks/subagent_verify.py)
+check "verify: a main session's transcript is never judged as a subagent's: silent, no call" '[ -z "$out" ] && [ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
 tpn=$(python3 -c "import sys;sys.path.insert(0,'lib');import transcript;print(len(transcript.task_prompt(sys.argv[1])))" "$PT")
 check "task_prompt: a parent-shaped transcript yields no task rather than its most recent spawn" '[ "$tpn" = "0" ]'
 
