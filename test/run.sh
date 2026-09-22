@@ -894,6 +894,70 @@ check "provenance: an agent's own Agent calls count as work - delegation is not 
 out=$(tx_py fork)
 check "provenance: a fork's work record and call count leave out the parent's spawn" '[ "$(echo "$out" | head -1)" = "1" ] && [ "$(echo "$out" | tail -1)" = "Bash" ]'
 
+
+# --- read-only fast path: the audit's bypasses (2026-09-21). Every one of
+# these took the SILENT fast path - never judged, never prompted - and several
+# were run by the auditor and did what they looked like they would not.
+ro() { python3 -c "import sys,importlib.util;sys.path.insert(0,'lib');s=importlib.util.spec_from_file_location('g','hooks/bash_risk_gate.py');g=importlib.util.module_from_spec(s);s.loader.exec_module(g);print(g.is_read_only(sys.argv[1]))" "$1"; }
+bypass_open=""
+while IFS= read -r c; do [ -n "$c" ] && [ "$(ro "$c")" = "True" ] && bypass_open="$bypass_open | $c"; done <<'CMDS'
+ls & rm -rf victim
+find victim -name "*.txt" -execdir rm {} +
+sed -n -i "1p" f.txt
+sed -ni '1p' f.txt
+sed -n '1w ~/.bashrc' x
+sed -n '1e rm -rf build' x
+git diff --output=victim.txt
+cat <(touch pwned)
+git branch --move main old
+git branch -f main HEAD~10
+git branch -Df feature
+git branch newfeature
+fd -e pyc -x rm
+rg --pre ./evil.sh foo
+yq -i '.a = 1' v.yaml
+go build -toolexec 'rm -rf build' ./...
+go env -w GOFLAGS=-x
+go build -o=/usr/local/bin/foo .
+git fetch --upload-pack='touch /tmp/p' .
+find . -fprint out.txt
+uniq in.txt out.txt
+helm template x . --post-renderer ./evil.sh
+CMDS
+check "fast path: none of the audit's write/delete/exec commands passes as read-only" '[ -z "$bypass_open" ] || { echo "   still open:$bypass_open"; false; }'
+lost=""
+while IFS= read -r c; do [ -n "$c" ] && [ "$(ro "$c")" = "False" ] && lost="$lost | $c"; done <<'CMDS'
+grep -n "func (s \*Server)\|TokenAddress" internal/api.go
+sed -n '10,20p' main.go
+sed -n '/func main/,/^}/p' main.go
+git branch --contains bc40ad1 2>/dev/null
+git branch -vv --sort=-committerdate
+sort f | uniq -c
+echo "=== a | b ; c ===" && git status
+cd ~/apps/x && git log --oneline -5 2>&1 | head
+CMDS
+check "fast path: real read-only commands keep it, quoted separators included" '[ -z "$lost" ] || { echo "   lost:$lost"; false; }'
+
+# OUTWARD asks without a judge. It missed every form below.
+ow() { python3 -c "import sys,importlib.util;sys.path.insert(0,'lib');s=importlib.util.spec_from_file_location('g','hooks/bash_risk_gate.py');g=importlib.util.module_from_spec(s);s.loader.exec_module(g);print(bool(g.OUTWARD.search(sys.argv[1])))" "$1"; }
+missed=""
+while IFS= read -r c; do [ -n "$c" ] && [ "$(ow "$c")" = "False" ] && missed="$missed | $c"; done <<'CMDS'
+kubectl -n prod delete deploy api
+kubectl --context mp apply -f k8s/
+terraform -chdir=infra apply
+git -C ../repo push
+make -C infra roll-apply
+npx wrangler deploy
+wrangler pages deploy dist
+env X=1 git push
+(git push)
+docker buildx build --push -t x .
+pnpm publish
+CMDS
+check "outward: global options, wrappers and subshells still ask" '[ -z "$missed" ] || { echo "   missed:$missed"; false; }'
+check "outward: a push on its own LINE still asks" '[ "$(ow "$(printf "git add -A\ngit push origin main")")" = "True" ]'
+check "outward: reading about deletes is not a delete" '[ "$(ow "kubectl get pods -o yaml | grep delete")" = "False" ] && [ "$(ow "git -C repo status")" = "False" ]'
+
 # The README states this number, and a number in prose drifts silently: it said
 # 111 while the suite ran 126, and the count of your own tests is the first
 # claim a reader checks. So the suite asserts its own README rather than
