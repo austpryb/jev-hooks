@@ -97,7 +97,9 @@ func Interview(env Env, plugins []Plugin, servers map[string]json.RawMessage, re
 	}
 	var hookOptions []huh.Option[string]
 	for _, h := range reg.Hooks {
-		hookOptions = append(hookOptions, huh.NewOption(label(h, hookW, reg.HookDesc[h]), h).Selected(true))
+		// The score leads, so the page reads best-first at a glance.
+		name := reg.Badge(h) + "  " + h
+		hookOptions = append(hookOptions, huh.NewOption(label(name, hookW+4, reg.HookDesc[h]), h).Selected(true))
 	}
 
 	names := make([]string, 0, len(servers))
@@ -173,6 +175,10 @@ func Interview(env Env, plugins []Plugin, servers map[string]json.RawMessage, re
 	}
 
 	help := "Enter/Tab: next  ·  Shift+Tab: back  ·  Space: toggle  ·  Ctrl+C: cancel"
+	hookHelp := help
+	if reg.RankedAsOf != "" {
+		hookHelp = "Ranked by observed usefulness (" + reg.RankedAsOf + "): +2 valuable · +1 useful · 0 mixed · -1 costly · ? no data\n" + help
+	}
 	form := huh.NewForm(
 		huh.NewGroup(
 			huh.NewInput().Title("What are you working on?").
@@ -184,7 +190,7 @@ func Interview(env Env, plugins []Plugin, servers map[string]json.RawMessage, re
 				OptionsFunc(pluginOptions, &task).Value(&selPlugins).Height(len(plugins)+2),
 		),
 		huh.NewGroup(
-			huh.NewMultiSelect[string]().Title("jev-hooks: which hooks run").Description(help).
+			huh.NewMultiSelect[string]().Title("jev-hooks: which hooks run").Description(hookHelp).
 				Options(hookOptions...).Value(&selHooks).Height(len(hookOptions)+2),
 		).WithHideFunc(func() bool { return !reg.Available || !contains(selPlugins, JevHooksID) }),
 		huh.NewGroup(

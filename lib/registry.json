@@ -16,5 +16,57 @@
     "fable": "planning, design and judgment about a system: compare approaches, weigh tradeoffs, review a decision, write a spec, a plan or prose explaining how something should work",
     "sonnet": "mechanical work on this machine: gather context, search a codebase, summarise what exists, run known commands, edit config, follow a procedure that is already decided",
     "haiku": "a small lookup or transformation where a mistake is obvious and cheap: find a file, list values, extract a field, reformat something short"
+  },
+  "ranking": {
+    "_comment": "Hooks in order of observed usefulness, best first. Loadout sorts its hooks page by this and shows each score. Scores: +2 clearly valuable, +1 useful, 0 mixed or neutral, -1 costs more than it returns, null not yet scorable. Re-rank as data accrues: read decisions.jsonl and the session transcripts, classify each firing helpful / false positive / neutral by what happened next, and update as_of and basis.",
+    "as_of": "2026-09-22",
+    "basis": "decisions.jsonl 2026-09-19..22 (5,800 Jev calls), 41 session transcripts; mostly pre-version-stamp decisions, so current code has only 13-16 each",
+    "order": [
+      {
+        "hook": "edit_gate",
+        "score": 2,
+        "why": "every reviewed ask was a write git could not undo"
+      },
+      {
+        "hook": "narrow",
+        "score": 1,
+        "why": "rare, sensible trims of bulky reads"
+      },
+      {
+        "hook": "model_router",
+        "score": 1,
+        "why": "few firings, sensible model picks"
+      },
+      {
+        "hook": "bash_gate",
+        "score": 0,
+        "why": "caught prod rolls and merges; asks on most heredoc edits git could undo"
+      },
+      {
+        "hook": "stop_check",
+        "score": 0,
+        "why": "real catches, but blocks questions and command blocks meant for the user"
+      },
+      {
+        "hook": "prompt_routing",
+        "score": 0,
+        "why": "advisory only; model hints mostly ignored"
+      },
+      {
+        "hook": "triage",
+        "score": null,
+        "why": "no firings logged yet; likely a logging gap"
+      },
+      {
+        "hook": "loop_detect",
+        "score": -1,
+        "why": "counted 1,782 streaks, never intervened"
+      },
+      {
+        "hook": "subagent_verify",
+        "score": -1,
+        "why": "skips ~96% of reports: cannot find the subagent transcript"
+      }
+    ]
   }
 }
