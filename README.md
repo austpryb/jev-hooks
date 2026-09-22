@@ -329,15 +329,22 @@ two licence rules — never build a pass-through, never publish a comparison
 against another model. An agent handed "use Jev for X" without it will get at
 least one of those wrong.
 
-## Choosing a session's loadout: `claude-loadout`
+## Choosing a session's loadout: `claude --loadout`
 
 Plugins load at startup, and no hook can change them once a session runs. So
-the choice happens before: `bin/claude-loadout` asks which plugins, MCP servers
-and model this session gets, then starts the real `claude` with the answer.
+the choice happens before: `claude --loadout` asks which plugins, hooks, MCP
+servers and model this session gets, then starts the real `claude` with the
+answer. It is **off by default**. A plain `claude` starts exactly as it always
+did, and `--loadout` is consumed, never passed on.
 
 - **Plugins** become `--settings '{"enabledPlugins": {...}}'`. A flag setting
   beats your user settings: under it a user-enabled plugin logs
   `enabled=false; will NOT register`.
+- **Hooks, one by one.** Claude Code enables a plugin whole, but when jev-hooks
+  is ticked a further screen lists each of its hooks. The unticked ones reach
+  the session as `JEV_HOOKS_DISABLE=<names>`, and each hook honours it. Hooks
+  inherit the `claude` process's environment. In a live session, switching off
+  `prompt_routing` and `stop_check` took them from two Jev calls to none.
 - **Model** becomes `--model <alias>`.
 - **MCP servers**: leave them all on and nothing is added. Turn any off and it
   starts `--strict-mcp-config` with a `0600` file of the kept servers (their
@@ -352,19 +359,25 @@ using the same criteria as the subagent router, and may tick a plugin that is
 normally off when the task clearly needs it. It never unticks one, so a safety
 hook does not vanish because a task description left it out.
 
-Only a bare, interactive launch is interviewed. Subcommands, `-p`,
-`--resume`/`--continue` and a non-terminal pass straight through, and so does
-`CLAUDE_NO_INTERVIEW=1`. Cancelling any screen starts Claude with your normal
-defaults. The screens use `whiptail`; without it, `claude` starts as usual.
+The screens size themselves to the terminal, and descriptions are cut to fit
+beside their names. With `--loadout`, subcommands, `-p`, `--resume`/`--continue`
+and a non-terminal still pass straight through. Cancelling any screen starts
+Claude with your normal defaults. The screens use `whiptail`.
 
-To make a bare `claude` ask, put this in `~/.bashrc`. It resolves the installed
-plugin on every launch, so a plugin update takes effect without editing it:
+To get `claude --loadout`, put this in `~/.bashrc`. A plain `claude` never
+touches the launcher; only `--loadout` does. The launcher is resolved from the
+installed plugin, so a plugin update needs no edit here:
 
 ```sh
 claude() {
-  local l; l="$(jq -r '.plugins["jev-hooks@jev-hooks"][0].installPath // empty' \
-      ~/.claude/plugins/installed_plugins.json 2>/dev/null)/bin/claude-loadout"
-  if [ -x "$l" ]; then "$l" "$@"; else command claude "$@"; fi
+  local a want= args=()
+  for a in "$@"; do if [ "$a" = --loadout ]; then want=1; else args+=("$a"); fi; done
+  if [ -n "$want" ]; then
+    local l; l="$(jq -r '.plugins["jev-hooks@jev-hooks"][0].installPath // empty' \
+        ~/.claude/plugins/installed_plugins.json 2>/dev/null)/bin/claude-loadout"
+    if [ -x "$l" ]; then "$l" --loadout "${args[@]}"; return; fi
+  fi
+  command claude "${args[@]}"
 }
 ```
 
@@ -435,7 +448,7 @@ their terms before enabling this on a repository whose prompts are sensitive.
 ## Test
 
 ```bash
-bash test/run.sh      # 221 checks against a local stub; no key, no network
+bash test/run.sh      # 230 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),

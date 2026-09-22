@@ -123,6 +123,8 @@ def repeated(sid, want, current):
 
 
 def main():
+    if jev.disabled("prompt_routing"):
+        return                       # switched off for this session (JEV_HOOKS_DISABLE)
     t0 = time.time()
     inp = jev.read_stdin()
     prompt = inp.get("prompt")

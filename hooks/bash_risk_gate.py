@@ -168,6 +168,8 @@ def is_read_only(cmd):
 
 
 def main():
+    if jev.disabled("bash_gate"):
+        return                       # switched off for this session (JEV_HOOKS_DISABLE)
     inp = jev.read_stdin()
     if inp.get("tool_name") != "Bash":
         return

@@ -190,6 +190,30 @@ def _log(nbytes, usage, secs, outcome):
         pass
 
 
+# Every hook by the name it logs under, with what it does in a phrase short
+# enough for a terminal checklist. bin/claude-loadout offers these one by one.
+HOOKS = {
+    "bash_gate": "asks before risky or outward shell commands",
+    "edit_gate": "asks before a write git cannot undo",
+    "narrow": "trims bulky output before it enters context",
+    "model_router": "picks the model each subagent runs on",
+    "loop_detect": "notices a tool call going nowhere",
+    "stop_check": "stops unverified claims and empty promises",
+    "subagent_verify": "checks a subagent's report against its work",
+    "triage": "keeps decisions across compaction",
+    "prompt_routing": "question/approval hints and model advice",
+}
+
+
+def disabled(name):
+    """True when this session turned the hook off. JEV_HOOKS_DISABLE is a comma
+    list of HOOKS names, set per session by bin/claude-loadout: plugins are
+    enabled or disabled whole, so a hook inside one has to honour its own switch.
+    Hooks inherit the claude process's environment - verified, a run started
+    with JEV_HOOKS_LOG pointed elsewhere had its hooks write there."""
+    return name in {x.strip() for x in os.environ.get("JEV_HOOKS_DISABLE", "").split(",") if x.strip()}
+
+
 def read_stdin():
     """The hook event, or {}. Anything that is not a JSON OBJECT is {} too:
     `null` or a list used to reach `.get()` in a hook with no guard of its own
