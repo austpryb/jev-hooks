@@ -6,18 +6,18 @@ change the session's own model, and `/model` is the only mid-session switch.
 The criteria are read by the judge, so they describe the WORK, never the
 model's marketing.
 """
-import os
+import json, os
 
-CRITERIA = {
-    "opus": "implementation and debugging in a real repository: write or change code, make a failing test pass, "
-            "work through a multi-step change where a wrong step is expensive to unwind",
-    "fable": "planning, design and judgment about a system: compare approaches, weigh tradeoffs, review a decision, "
-             "write a spec, a plan or prose explaining how something should work",
-    "sonnet": "mechanical work on this machine: gather context, search a codebase, summarise what exists, run known "
-              "commands, edit config, follow a procedure that is already decided",
-    "haiku": "a small lookup or transformation where a mistake is obvious and cheap: find a file, list values, "
-             "extract a field, reformat something short",
-}
+def _criteria():
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "registry.json")) as f:
+            return json.load(f)["criteria"]
+    except Exception:
+        return {}
+
+
+# Defined once in registry.json, which the claude-loadout binary also reads.
+CRITERIA = _criteria()
 
 # Declining is not neutral where a subagent is concerned: a spawn left alone
 # inherits the PARENT's model, which is the expensive one. Measured against the

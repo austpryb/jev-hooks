@@ -332,51 +332,55 @@ least one of those wrong.
 ## Choosing a session's loadout: `claude --loadout`
 
 Plugins load at startup, and no hook can change them once a session runs. So
-the choice happens before: `claude --loadout` asks which plugins, hooks, MCP
-servers and model this session gets, then starts the real `claude` with the
-answer. It is **off by default**. A plain `claude` starts exactly as it always
-did, and `--loadout` is consumed, never passed on.
+the choice happens before: `claude --loadout` walks through a few pages, then
+starts the real `claude` with your picks. The pages are task, plugins,
+jev-hooks hooks, MCP servers, model and a confirm step. It is **off by
+default**, and a plain `claude` never touches it.
+
+It is a small Go binary (`loadout/`, built on Charm's `huh`). **Enter/Tab moves
+forward, Shift+Tab goes back, Space or `x` toggles, and Ctrl+C cancels without
+starting anything.** Every page sizes itself to the terminal, and descriptions
+are cut to fit. The last page summarises the loadout before you start it.
 
 - **Plugins** become `--settings '{"enabledPlugins": {...}}'`. A flag setting
   beats your user settings: under it a user-enabled plugin logs
   `enabled=false; will NOT register`.
 - **Hooks, one by one.** Claude Code enables a plugin whole, but when jev-hooks
-  is ticked a further screen lists each of its hooks. The unticked ones reach
-  the session as `JEV_HOOKS_DISABLE=<names>`, and each hook honours it. Hooks
-  inherit the `claude` process's environment. In a live session, switching off
-  `prompt_routing` and `stop_check` took them from two Jev calls to none.
+  is ticked a page lists each of its hooks. Unticked ones reach the session as
+  `JEV_HOOKS_DISABLE`, and each hook honours it. Hooks inherit claude's
+  environment. In a live session, switching off `prompt_routing` and
+  `stop_check` took them from two Jev calls to none.
 - **Model** becomes `--model <alias>`.
 - **MCP servers**: leave them all on and nothing is added. Turn any off and it
   starts `--strict-mcp-config` with a `0600` file of the kept servers (their
   configs can carry tokens, so they never go on the command line). Strict mode
   starts ONLY what is listed. The claude.ai connectors cannot be listed, since
   they are proxied through your account, so turning any server off drops them
-  for that session. The screen says so. A kept plugin's own servers are copied
-  into the file, because strict mode drops those too.
+  for that session. The page and the summary both say so. A kept plugin's own
+  servers are copied into the file, because strict mode drops those too.
 
-A one-line task description is optional. Given one, Jev pre-selects the model,
-using the same criteria as the subagent router, and may tick a plugin that is
-normally off when the task clearly needs it. It never unticks one, so a safety
-hook does not vanish because a task description left it out.
+The first page takes an optional task description. Given one, Jev pre-selects
+the model and may tick a plugin that is normally off when the task clearly
+needs it. It never unticks one. The key is read from `TYPESAFE_API_KEY`, else
+from Claude's `settings.json` `env`, where it usually lives and where a shell
+never sees it. The hook list and the model criteria come from
+`lib/registry.json` in the installed plugin: one definition, read by the hooks
+and by the binary.
 
-The screens size themselves to the terminal, and descriptions are cut to fit
-beside their names. With `--loadout`, subcommands, `-p`, `--resume`/`--continue`
-and a non-terminal still pass straight through. Cancelling any screen starts
-Claude with your normal defaults. The screens use `whiptail`.
+A subcommand, `-p`, `--resume`/`--continue` or a non-terminal runs `claude`
+exactly as asked.
 
-To get `claude --loadout`, put this in `~/.bashrc`. A plain `claude` never
-touches the launcher; only `--loadout` does. The launcher is resolved from the
-installed plugin, so a plugin update needs no edit here:
+Build it once, then add the shell function:
+
+```sh
+cd loadout && go build -o ~/.local/bin/claude-loadout .
+```
 
 ```sh
 claude() {
   local a want= args=()
   for a in "$@"; do if [ "$a" = --loadout ]; then want=1; else args+=("$a"); fi; done
-  if [ -n "$want" ]; then
-    local l; l="$(jq -r '.plugins["jev-hooks@jev-hooks"][0].installPath // empty' \
-        ~/.claude/plugins/installed_plugins.json 2>/dev/null)/bin/claude-loadout"
-    if [ -x "$l" ]; then "$l" --loadout "${args[@]}"; return; fi
-  fi
+  if [ -n "$want" ] && command -v claude-loadout >/dev/null; then claude-loadout "${args[@]}"; return; fi
   command claude "${args[@]}"
 }
 ```
@@ -448,7 +452,7 @@ their terms before enabling this on a repository whose prompts are sensitive.
 ## Test
 
 ```bash
-bash test/run.sh      # 230 checks against a local stub; no key, no network
+bash test/run.sh      # 215 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),
