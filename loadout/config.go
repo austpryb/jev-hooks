@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,10 +23,22 @@ type Plugin struct {
 // what each model is for. Read at runtime so the binary always matches the
 // hooks actually installed.
 type Registry struct {
-	Hooks     []string          // in file order
+	Hooks     []string // ranked order, best first; unranked hooks after, in file order
 	HookDesc  map[string]string
 	Criteria  map[string]string
 	Available bool
+	// Rank is each ranked hook's usefulness score (registry.json "ranking").
+	// A hook absent here is unranked; one present with a nil Score is ranked
+	// but not yet scorable.
+	Rank map[string]Ranking
+	// RankedAsOf is the date the ranking was last derived from data.
+	RankedAsOf string
+}
+
+// Ranking is one hook's place in registry.json's "ranking".
+type Ranking struct {
+	Score *int   `json:"score"` // +2 .. -1; nil = not yet scorable
+	Why   string `json:"why"`
 }
 
 // Env is where discovery looks: a home directory and a working directory.
@@ -231,15 +244,61 @@ func (e Env) LoadRegistry() Registry {
 	var f struct {
 		Hooks    json.RawMessage   `json:"hooks"`
 		Criteria map[string]string `json:"criteria"`
+		Ranking  struct {
+			AsOf  string `json:"as_of"`
+			Order []struct {
+				Hook string `json:"hook"`
+				Ranking
+			} `json:"order"`
+		} `json:"ranking"`
 	}
 	if json.Unmarshal(b, &f) != nil {
 		return r
 	}
 	json.Unmarshal(f.Hooks, &r.HookDesc)
-	r.Hooks = orderedKeys(f.Hooks)
 	r.Criteria = f.Criteria
+	r.RankedAsOf = f.Ranking.AsOf
+	r.Rank = map[string]Ranking{}
+	var ranked []string
+	for _, o := range f.Ranking.Order {
+		if _, known := r.HookDesc[o.Hook]; !known {
+			continue // a ranking for a hook this plugin no longer has
+		}
+		if _, dup := r.Rank[o.Hook]; dup {
+			continue
+		}
+		r.Rank[o.Hook] = o.Ranking
+		ranked = append(ranked, o.Hook)
+	}
+	// Ranked hooks first, best first; any hook the ranking does not name yet (a
+	// new one) keeps its file position after them, so a hook is never hidden
+	// by a stale ranking.
+	r.Hooks = ranked
+	for _, h := range orderedKeys(f.Hooks) {
+		if _, ok := r.Rank[h]; !ok {
+			r.Hooks = append(r.Hooks, h)
+		}
+	}
 	r.Available = len(r.Hooks) > 0
 	return r
+}
+
+// Badge is a hook's score as the hooks page shows it: "+2", "+1", " 0", "-1",
+// " ?" for ranked-but-unscorable, and blank for a hook the ranking omits.
+func (r Registry) Badge(hook string) string {
+	rk, ok := r.Rank[hook]
+	switch {
+	case !ok:
+		return "  "
+	case rk.Score == nil:
+		return " ?"
+	case *rk.Score > 0:
+		return fmt.Sprintf("+%d", *rk.Score)
+	case *rk.Score == 0:
+		return " 0"
+	default:
+		return fmt.Sprintf("%d", *rk.Score)
+	}
 }
 
 // orderedKeys returns a JSON object's keys in file order; a Go map loses it,

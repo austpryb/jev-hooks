@@ -179,3 +179,57 @@ func TestFitNeverOverflows(t *testing.T) {
 		t.Fatalf("got %d chars: %q", len(got), got)
 	}
 }
+
+func TestRankingOrdersTheHooksPageBestFirst(t *testing.T) {
+	e := fixture(t)
+	root := filepath.Join(e.Home, "jh", "lib", "registry.json")
+	body := `{"hooks":{"bash_gate":"a","stop_check":"b","triage":"c","new_hook":"d"},
+	  "ranking":{"as_of":"2026-09-22","order":[
+	    {"hook":"triage","score":null,"why":"no data"},
+	    {"hook":"gone_hook","score":2,"why":"removed from the plugin"},
+	    {"hook":"stop_check","score":-1,"why":"noisy"},
+	    {"hook":"bash_gate","score":2,"why":"valuable"}]}}`
+	if err := os.WriteFile(root, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := e.LoadRegistry()
+	// Ranked hooks in ranking order; a stale entry for a hook the plugin no
+	// longer has is dropped; a new hook the ranking does not name yet is kept,
+	// after them, rather than hidden by a stale ranking.
+	if got := strings.Join(r.Hooks, ","); got != "triage,stop_check,bash_gate,new_hook" {
+		t.Fatalf("hooks page order = %s", got)
+	}
+	if r.RankedAsOf != "2026-09-22" {
+		t.Fatalf("as_of = %q", r.RankedAsOf)
+	}
+	for h, want := range map[string]string{"bash_gate": "+2", "stop_check": "-1", "triage": " ?", "new_hook": "  "} {
+		if got := r.Badge(h); got != want {
+			t.Fatalf("Badge(%s) = %q, want %q", h, got, want)
+		}
+	}
+}
+
+func TestShippedRegistryRanksEveryHook(t *testing.T) {
+	// The registry this repo ships: every hook it declares is ranked, so the
+	// hooks page never shows an unscored hook by accident.
+	b, err := os.ReadFile(filepath.Join("..", "lib", "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := Env{Home: t.TempDir()}
+	dir := filepath.Join(e.Home, "jh", "lib")
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, "registry.json"), b, 0o644)
+	os.MkdirAll(filepath.Join(e.Home, ".claude", "plugins"), 0o755)
+	os.WriteFile(filepath.Join(e.Home, ".claude", "plugins", "installed_plugins.json"),
+		[]byte(`{"plugins":{"jev-hooks@jev-hooks":[{"installPath":"`+filepath.Join(e.Home, "jh")+`"}]}}`), 0o644)
+	r := e.LoadRegistry()
+	if len(r.Hooks) == 0 {
+		t.Fatal("shipped registry has no hooks")
+	}
+	for _, h := range r.Hooks {
+		if _, ok := r.Rank[h]; !ok {
+			t.Fatalf("hook %s is not ranked in lib/registry.json", h)
+		}
+	}
+}

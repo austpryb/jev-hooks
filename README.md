@@ -350,6 +350,16 @@ are cut to fit. The last page summarises the loadout before you start it.
   `JEV_HOOKS_DISABLE`, and each hook honours it. Hooks inherit claude's
   environment. In a live session, switching off `prompt_routing` and
   `stop_check` took them from two Jev calls to none.
+- **Ranked by usefulness.** The hooks page lists them best first, each with a
+  score: `+2` clearly valuable, `+1` useful, `0` mixed, `-1` costs more than it
+  returns, `?` not yet scorable. The order and scores live in
+  `lib/registry.json` under `ranking`, with the date and the evidence they came
+  from, and loadout reads them at runtime from the installed plugin, so a
+  re-rank needs no rebuild. A hook the ranking does not name yet still appears,
+  after the ranked ones. The first ranking (2026-09-22) came from the decision
+  log and 41 session transcripts, classifying each firing helpful, false
+  positive or neutral by what happened next. Re-rank the same way as data
+  accrues.
 - **Model** becomes `--model <alias>`.
 - **MCP servers**: leave them all on and nothing is added. Turn any off and it
   starts `--strict-mcp-config` with a `0600` file of the kept servers (their
