@@ -71,7 +71,7 @@ func Build(real string, rest []string, plugins []Plugin, servers map[string]json
 		argv = append(argv, "--strict-mcp-config", "--mcp-config", path)
 	}
 	argv = append(argv, rest...)
-	if len(c.DisabledHooks) > 0 && contains(c.Plugins, JevHooksID) {
+	if len(c.DisabledHooks) > 0 && hasJevHooks(c.Plugins) {
 		// Hooks inherit claude's environment - verified in a live session -
 		// and each jev-hook honours its own name in JEV_HOOKS_DISABLE.
 		env = append(env, "JEV_HOOKS_DISABLE="+strings.Join(c.DisabledHooks, ","))

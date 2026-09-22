@@ -120,7 +120,7 @@ func scriptedChoice(env Env, own map[string]string, plugins []Plugin, servers ma
 		}
 	}
 	hooks := reg.Hooks
-	if v, ok := own["--pick-hooks"]; ok && contains(c.Plugins, JevHooksID) {
+	if v, ok := own["--pick-hooks"]; ok && hasJevHooks(c.Plugins) {
 		kept := splitList(v)
 		for _, h := range hooks {
 			if !contains(kept, h) {
