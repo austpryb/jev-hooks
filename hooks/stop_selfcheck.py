@@ -66,12 +66,13 @@ def last_prompt_and_results(path):
     comes from transcript.tool_results so this check and the subagent verifier
     weigh the same evidence: each call paired with its output, not loose
     results that name nothing."""
-    prompt = ""
+    prompt, at = "", -1
     for s in transcript.segments(path):
         if s["kind"] == "prompt" and not any(b in s["text"] for b in transcript.BOILERPLATE) \
-                and not transcript.is_harness_prompt(s["text"]):
-            prompt = s["text"]
-    return prompt, transcript.tool_results(path, chars=RESULTS_CHARS)
+                and not transcript.is_harness_prompt(s["text"]) and not transcript._is_summary(s["text"]):
+            prompt, at = s["text"], s["i"]     # a compaction summary is not the user's question
+    return (prompt, transcript.tool_results(path, chars=RESULTS_CHARS),
+            transcript.tool_results(path, chars=RESULTS_CHARS, after=at))
 
 
 def sentence_for(check, message):
@@ -100,9 +101,13 @@ def main():
         message = transcript.last_assistant_text(path)
     if not message:
         return
-    prompt, results = last_prompt_and_results(path) if path else ("", [])
-    bg = in_flight(inp, results)
-    denied = any(DENIED.search(r) for r in results)
+    prompt, results, this_turn = last_prompt_and_results(path) if path else ("", [], [])
+    # "Still running" and "was denied" are facts about THIS turn. Read over the
+    # whole session, a background build that finished turns ago set in_flight
+    # and excused a fresh, real promise (audit 2026-09-21). An unverified claim
+    # may rest on earlier evidence, so `results` stays the whole record.
+    bg = in_flight(inp, this_turn)
+    denied = any(DENIED.search(r) for r in this_turn)
     state = {"last_user_prompt": prompt[:4_000], "final_message": message[:MESSAGE_CHARS],
              "recent_tool_results": results, "in_flight": bg, "permission_denied": denied}
     q = {

@@ -12,7 +12,7 @@ Output when it has an opinion (PreToolUse JSON contract):
                           "permissionDecisionReason": "..."}}
 JEV_HOOKS_GATE_MODE=warn downgrades every deny to ask.
 """
-import json, os, re, sys
+import json, os, re, shlex, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import jev
 
@@ -22,7 +22,7 @@ import jev
 # hides a command (`cd $(...)`) is caught by UNSAFE before this is consulted.
 READ_ONLY = re.compile(
     r"^\s*(cd|ls|cat|head|tail|wc|pwd|echo|printf|which|type|date|stat|file|tree|du|df|"
-    r"grep|rg|ugrep|find|fd|sed -n|uniq|cut|tr|jq|yq|diff|"
+    r"grep|rg|ugrep|find|fd|sed -n|sort|uniq|cut|tr|jq|yq|diff|"
     r"git (status|log|diff|show|rev-parse|ls-files|blame|describe|fetch)|"
     r"git branch(?!.*\s-[dDmM]\b)|"                                # listing only; -d/-D/-m/-M mutate
     r"git remote(?!\s+(add|remove|rm|rename|set-url|prune|update)\b)|"
@@ -33,7 +33,17 @@ READ_ONLY = re.compile(
 # Anything here means the command can write, run something else, or hide a
 # command, so the fast path is refused and Jev reads it (audit 2026-09-19: every
 # one of these bypassed the old first-word check).
-UNSAFE = re.compile(r"\$\(|`|-delete\b|-exec\b|-ok\b|system\(|\bxargs\b|\btee\b|\s-o\s")
+UNSAFE = re.compile(
+    r"\$\(|`|[<>]\(|-delete\b|-exec\b|-execdir\b|-ok\b|-okdir\b|-fprint|-fls\b|system\(|\bxargs\b|\btee\b|"
+    r"\s-o[\s=]|--output\b|-toolexec\b|-vettool\b|--pre\b|--upload-pack\b|--receive-pack\b|--post-renderer\b")
+# Programs on the list above whose FLAGS turn them into writers or launchers.
+# Audit 2026-09-21: 23 of 23 such commands took the silent fast path - among
+# them `sed -n '1e rm -rf build'`, `find -execdir rm`, `git branch -f main
+# HEAD~10`, `uniq in out`, and `cat <(touch x)`. A segment that trips any of
+# these is sent to the judge instead; being wrong here costs one Jev call.
+GIT_BRANCH_VALUE = {"--merged", "--no-merged", "--contains", "--no-contains", "--points-at", "--sort", "--format"}
+GIT_BRANCH_LIST = {"-a", "-r", "-l", "-v", "-vv", "--all", "--remotes", "--list", "--show-current",
+                   "--no-color", "--color", "--column", "--no-column", "-i", "--ignore-case"}
 # Redirections that only discard or merge streams are fine; any other `>` writes a file.
 HARMLESS_REDIRECT = re.compile(r"2>&1|&>\s*/dev/null|[12]?>{1,2}\s*/dev/null")
 
@@ -44,26 +54,117 @@ HARMLESS_REDIRECT = re.compile(r"2>&1|&>\s*/dev/null|[12]?>{1,2}\s*/dev/null")
 # start of a command segment so a grep that merely MENTIONS `git push` is not a
 # push. Matching here skips Jev entirely: one fewer call, and the prompt that
 # matters least deserves to depend on a judge that is up.
+# A program's global options may sit between it and the subcommand
+# (`kubectl -n prod delete`, `git -C ../repo push`, `terraform -chdir=infra
+# apply`): an option, optionally followed by one value.
+_OPTS = r"(?:-\S+(?:\s+[^-\s|;&()]\S*)?\s+)*"
 OUTWARD = re.compile(
-    r"(?:^|[;&|]\s*|&&\s*|\|\|\s*)(?:sudo\s+)?("
-    r"gh\s+(?:pr\s+(?:merge|create)|release\s+create)|"
-    r"git\s+push(?!.*--dry-run)|"
-    r"terraform\s+(?:apply|destroy)|"
-    r"helm\s+(?:install|upgrade|uninstall)|"
-    r"kubectl\s+(?:apply|delete)|"
-    r"npm\s+publish|docker\s+push|wrangler\s+(?:deploy|publish)|"
-    r"make\s+roll-apply)\b")
+    r"(?:^|[;&|(\n]\s*)"                                   # a segment start, incl. a newline or a subshell
+    r"(?:(?:sudo|time|env|npx|bunx|pnpm\s+dlx)\s+(?:\w+=\S*\s+)*)*"   # wrappers and VAR=val
+    r"("
+    r"gh\s+" + _OPTS + r"(?:pr\s+(?:merge|create)|release\s+create)|"
+    r"git\s+" + _OPTS + r"push(?![^\n;&|]*--dry-run)|"
+    r"terraform\s+" + _OPTS + r"(?:apply|destroy)|"
+    r"helm\s+" + _OPTS + r"(?:install|upgrade|uninstall)|"
+    r"kubectl\s+" + _OPTS + r"(?:apply|delete)|"
+    r"(?:npm|pnpm|yarn(?:\s+npm)?|bun)\s+publish|"
+    r"docker\s+push|docker\s+(?:buildx\s+)?build\b[^\n;&|]*\s--push|"
+    r"wrangler\s+(?:pages\s+)?(?:deploy|publish)|"
+    r"make\s+" + _OPTS + r"roll-apply)\b")
+
+
+def _tokens(seg):
+    try:
+        return shlex.split(seg)
+    except ValueError:
+        return None                    # unbalanced quotes: not provably anything
+
+
+def _segment_read_only(seg):
+    """One command segment: on the read-only list AND not one of the listed
+    programs used with a flag that writes, deletes or launches."""
+    if not READ_ONLY.match(seg):
+        return False
+    t = _tokens(HARMLESS_REDIRECT.sub(" ", seg))     # `2>/dev/null` is not an argument
+    if t is None:
+        return False
+    prog = t[0] if t else ""
+    if prog == "sed":
+        # Only `sed -n '<address>p' file`: a single print command. A script that
+        # does not END in p, holds a second command, or edits in place can write
+        # (w), run a shell (e) or rewrite the file (-i).
+        for x in t[1:]:
+            if x.startswith(("--in-place", "--expression", "--file", "--separate")):
+                return False
+            if x.startswith("-") and not x.startswith("--") and set(x[1:].split(".")[0]) & set("iefs"):
+                return False           # -i, -i.bak, -ni, -e, -f: edits in place or adds a command
+        scripts = [x for x in t[1:] if not x.startswith("-")]
+        if not scripts or not scripts[0].endswith("p") or ";" in scripts[0] or "\n" in scripts[0]:
+            return False
+    elif prog == "git" and len(t) > 1 and t[1] == "branch":
+        want_value = False
+        for x in t[2:]:
+            if want_value:
+                want_value = False; continue
+            if x in GIT_BRANCH_VALUE:
+                want_value = True; continue
+            if any(x.startswith(v + "=") for v in GIT_BRANCH_VALUE) or x in GIT_BRANCH_LIST:
+                continue
+            return False               # -d/-D/-m/-M/-f/-c, a clustered -Df, or a NAME: it writes
+    elif prog == "uniq":
+        if len([x for x in t[1:] if not x.startswith("-")]) > 1:
+            return False               # `uniq IN OUT` overwrites OUT
+    elif prog == "fd":
+        if any(x in ("-x", "-X", "--exec", "--exec-batch") for x in t[1:]):
+            return False
+    elif prog == "yq":
+        if any(x in ("-i", "--inplace") or x.startswith("--inplace=") for x in t[1:]):
+            return False
+    elif prog == "go" and len(t) > 1 and t[1] == "env":
+        if any(x in ("-w", "-u") for x in t[2:]):
+            return False               # `go env -w` persists a setting
+    return True
+
+
+def split_segments(cmd):
+    """Split on | || && ; newline and a bare & - but only OUTSIDE quotes. A
+    regex alternation inside a quoted grep pattern (`grep "a\\|b"`) is not a
+    pipe, and splitting there cut the pattern in half. A bare `&` backgrounds
+    the left side and RUNS the right one; `&&`, `2>&1` and `&>` are not it."""
+    out, cur, q, i, n = [], [], None, 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if q:
+            cur.append(c)
+            if c == "\\" and q == '"' and i + 1 < n:
+                cur.append(cmd[i + 1]); i += 2; continue
+            if c == q:
+                q = None
+            i += 1; continue
+        if c == "\\" and i + 1 < n:
+            cur.append(c); cur.append(cmd[i + 1]); i += 2; continue
+        if c in "'\"":
+            q = c; cur.append(c); i += 1; continue
+        two = cmd[i:i + 2]
+        if two in ("||", "&&"):
+            out.append("".join(cur)); cur = []; i += 2; continue
+        if c in "|;\n":
+            out.append("".join(cur)); cur = []; i += 1; continue
+        if c == "&" and not (i > 0 and cmd[i - 1] == ">") and not (i + 1 < n and cmd[i + 1] == ">"):
+            out.append("".join(cur)); cur = []; i += 1; continue
+        cur.append(c); i += 1
+    out.append("".join(cur))
+    return [x.strip() for x in out if x.strip()]
 
 
 def is_read_only(cmd):
-    """True only when EVERY segment starts with a read-only program and nothing
-    in the command can write, delete, or run a hidden command."""
+    """True only when EVERY segment is a read-only program used read-only, and
+    nothing in the command can write, delete, or run a hidden command."""
     if UNSAFE.search(cmd):
         return False
     if ">" in HARMLESS_REDIRECT.sub("", cmd):
         return False
-    parts = re.split(r"\|\||&&|;|\||\n", cmd)
-    return all(READ_ONLY.match(p) for p in parts if p.strip())
+    return all(_segment_read_only(p) for p in split_segments(cmd))
 
 
 def main():

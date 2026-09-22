@@ -706,6 +706,49 @@ out=$(pr "$(pr_in 'Compare the two designs and recommend one. [model=pick:fable]
 check "hint: an unrecognised model is never reasoned about" '! echo "$out" | grep -q "/model"'
 rm -f "$TX" "$TXU"
 
+
+# --- audit 2026-09-21: prompt routing, compaction, stdin, loop lock, edit gate
+# A pasted HTML list used to hang the prompt hook for ~15s (exponential regex).
+t0=$(date +%s%N)
+out=$(printf '%s' "$(python3 -c 'import json;print(json.dumps({"prompt":"<li>a</li>"*24+" why is this list rendering twice? [kind=pick:question]","session_id":"rx","cwd":"/tmp/nowhere"}))')" | python3 hooks/prompt_routing.py)
+ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+check "routing: a pasted tag list does not hang the hook (${ms} ms)" '[ "$ms" -lt 3000 ]'
+check "routing: tags followed by a question are a message, not a wrapper" 'echo "$out" | grep -q "reads as a question"'
+
+# A space in the model list silenced EVERY hint via a swallowed KeyError.
+TXS=$(mktx claude-sonnet-5)
+out=$(JEV_HOOKS_HINT_MODELS="opus, sonnet" pr "$(pr_in 'Make the failing worker test pass. [kind=pick:question] [model=pick:opus]' "$TXS" sp1)")
+check "hint: spaces in JEV_HOOKS_HINT_MODELS do not silence the hook" 'echo "$out" | grep -q "/model opus" && echo "$out" | grep -q "reads as a question"'
+# The no-repeat state is keyed on the model it was given ON: once the user moves, it may come back.
+TXO=$(mktx claude-opus-5)
+pr "$(pr_in 'Make the failing worker test pass. [model=pick:opus]' "$TXS" rs)" >/dev/null
+pr "$(pr_in 'Make the failing worker test pass. [model=pick:opus]' "$TXO" rs)" >/dev/null
+out=$(pr "$(pr_in 'Make the failing worker test pass. [model=pick:opus]' "$TXS" rs)")
+check "hint: advice returns after the user moves off the model it recommended" 'echo "$out" | grep -q "/model opus"'
+rm -f "$TXS" "$TXO"
+
+# A later compaction that keeps nothing must not re-inject an earlier keep-set.
+printf '%s' "{\"session_id\":\"kk\",\"transcript_path\":\"$PWD/test/fixtures/session.jsonl\",\"hook_event_name\":\"PreCompact\",\"trigger\":\"auto\"}" | python3 hooks/precompact_triage.py
+had=$([ -s "$CLAUDE_PLUGIN_DATA/keep/kk.md" ] && echo yes)
+printf '%s' "{\"session_id\":\"kk\",\"transcript_path\":\"$PWD/test/fixtures/session.jsonl\",\"hook_event_name\":\"PreCompact\",\"trigger\":\"auto\"}" | TYPESAFE_BASE_URL=http://127.0.0.1:1 python3 hooks/precompact_triage.py
+out=$(printf '%s' '{"session_id":"kk","hook_event_name":"SessionStart","source":"compact"}' | python3 hooks/sessionstart_reinject.py)
+check "triage: a compaction with the judge down re-injects nothing stale" '[ "$had" = yes ] && [ -z "$out" ]'
+
+# Anything that is not a JSON object on stdin fails open, in every hook.
+crashed=""
+for h in hooks/*.py; do echo null | python3 "$h" >/dev/null 2>&1 || crashed="$crashed $h"; done
+check "stdin: null input fails open in every hook" '[ -z "$crashed" ] || { echo "   crashed:$crashed"; false; }'
+
+# NotebookEdit changes one cell; it is not a whole-file write.
+NB=$HOME/.cache/jevtest-nb-$$; mkdir -p "$NB" && ( cd "$NB" && git init -q && printf '{"cells":[]}' > nb.ipynb && git add -A && git -c user.email=t@t -c user.name=t commit -qm i && printf '{"cells":[1]}' > nb.ipynb )
+out=$(printf '%s' "{\"tool_name\":\"NotebookEdit\",\"tool_input\":{\"notebook_path\":\"$NB/nb.ipynb\",\"cell_id\":\"a\",\"new_source\":\"x\"}}" | python3 hooks/edit_risk_gate.py)
+check "edit gate: a one-cell NotebookEdit is not a whole-file replacement" '! echo "$out" | grep -q "replaces the whole"'
+# A committed symlink is judged by what it points at, not by its own git state.
+mkdir -p "$NB/out" && echo s > "$NB/out/.env" && mkdir -p "$NB/r" && ( cd "$NB/r" && git init -q && ln -s ../out/.env .env && git add -A && git -c user.email=t@t -c user.name=t commit -qm i )
+dbg=$(printf '%s' "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$NB/r/.env\",\"content\":\"x\"}}" | JEV_HOOKS_DEBUG=1 TYPESAFE_BASE_URL=http://127.0.0.1:1 python3 hooks/edit_risk_gate.py 2>&1)
+check "edit gate: a clean symlink to an unversioned file does not take the git-clean fast path" '! echo "$dbg" | grep -q "git clean"'
+rm -rf "$NB"
+
 # --- model router (hooks/model_router.py)
 # A hook cannot change the SESSION's model - no hook event carries one. A
 # subagent's it can: the Agent tool takes `model`, a per-invocation model beats
@@ -757,6 +800,22 @@ out=$(TYPESAFE_BASE_URL=http://127.0.0.1:1 mr "$(agent 'Find the file. [model=pi
 check "router: judge unreachable fails open" '[ -z "$out" ]'
 out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"ls"}}' | python3 hooks/model_router.py)
 check "router: another tool is not an Agent spawn" '[ -z "$out" ]'
+# A fork runs on its parent's model whatever its input says (observed: rewritten
+# to haiku, ran on opus, meta.json said "inherit"). Routing one only made the log
+# record a route that never happened.
+before=$(wc -l < "$JEV_STUB_RECORD")
+out=$(mr "$(agent 'Find the file. [model=pick:haiku]' '{"subagent_type":"fork"}')")
+check "router: a fork is never routed - its model cannot be changed" '[ -z "$out" ] && [ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
+out=$(JEV_HOOKS_ROUTER_FORCE=1 JEV_HOOKS_ROUTER_TYPES=fork,general-purpose mr "$(agent 'Find the file. [model=pick:haiku]' '{"subagent_type":"fork"}')")
+check "router: not even FORCE or an explicit type list routes a fork" '[ -z "$out" ]'
+# A typed agent can define its own model, and a route beats the definition:
+# claude-code-guide runs on haiku by definition and was routed UP to sonnet.
+out=$(mr "$(agent 'How do SubagentStop hooks receive stdin? [model=pick:sonnet]' '{"subagent_type":"claude-code-guide"}')")
+check "router: a typed agent keeps the model its definition gives it" '[ -z "$out" ]'
+out=$(JEV_HOOKS_ROUTER_TYPES=general-purpose,Explore mr "$(agent 'Find the file. [model=pick:haiku]' '{"subagent_type":"Explore"}')")
+check "router: a type named in JEV_HOOKS_ROUTER_TYPES is routed" 'echo "$out" | grep -q "\"model\": \"haiku\""'
+out=$(printf '%s' '{"tool_name":"Agent","tool_input":{"prompt":"Find the file. [model=pick:haiku]","description":"d"}}' | python3 hooks/model_router.py)
+check "router: an unset subagent_type is general-purpose, and is routed" 'echo "$out" | grep -q "\"model\": \"haiku\""'
 before=$(wc -l < "$JEV_STUB_RECORD")
 out=$(mr '{"tool_name":"Agent","tool_input":{"description":"d"}}')
 check "router: a spawn with no task never reaches the judge" '[ -z "$out" ] && [ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
@@ -835,6 +894,112 @@ check "stop check: hook feedback, the empty-reply nudge and a hand-back are neve
 out=$(stopin "All 212 integration tests pass. [promise=no] [unanswered=no] [unverified=yes]" 0 | python3 hooks/stop_selfcheck.py)
 check "stop check: a block tells the USER how to dispute it" 'echo "$out" | python3 -c "import json,sys;d=json.load(sys.stdin);sys.exit(0 if \"bin/wrong.py stop_check\" in d.get(\"systemMessage\",\"\") else 1)"'
 check "stop check: the dispute command is not in the reason the model reads" 'echo "$out" | python3 -c "import json,sys;d=json.load(sys.stdin);sys.exit(0 if \"wrong.py\" not in d[\"reason\"] else 1)"'
+
+
+# --- transcript provenance (audit 2026-09-21)
+tx_py() { python3 - "$@" <<'TXPY'
+import json,sys,tempfile
+sys.path.insert(0,'lib'); import transcript as t
+def rec(typ,c,**kw):
+    r={"type":typ,"message":{"role":typ,"content":c}}; r.update(kw); return json.dumps(r)
+def write(L):
+    f=tempfile.NamedTemporaryFile("w",suffix=".jsonl",delete=False); f.write("\n".join(L)+"\n"); f.close(); return f.name
+case=sys.argv[1]
+if case=="main_with_agent_result":
+    # A MAIN session: isSidechain false, and its own Agent call's RESULT carries agentId.
+    p=write([rec("user","Investigate the dart sdk.",isSidechain=False),
+             rec("assistant",[{"type":"tool_use","id":"a1","name":"Agent","input":{"prompt":"Investigate X"}}],isSidechain=False),
+             rec("user",[{"type":"tool_result","tool_use_id":"a1","content":"done"}],isSidechain=False,toolUseResult={"agentId":"ab7ef882"})])
+    print(t.is_subagent_transcript(p), t.is_main_session_transcript(p))
+elif case=="delegating_worker":
+    # A subagent with its own brief that then delegates, and gets a child's notice back.
+    p=write([rec("user","Your tickets: MP-406, MP-407, MP-408. Ship all three.",isSidechain=True,agentId="w1"),
+             rec("assistant",[{"type":"tool_use","id":"c1","name":"Agent","input":{"prompt":"You own ONLY ticket MP-407."}}],isSidechain=True,agentId="w1"),
+             rec("user",[{"type":"tool_result","tool_use_id":"c1","content":"launched"}],isSidechain=True,agentId="w1"),
+             rec("user","[SYSTEM NOTIFICATION - NOT USER INPUT]\n1. child finished\n2. see output",isSidechain=True,agentId="w1"),
+             rec("assistant",[{"type":"tool_use","id":"b1","name":"Bash","input":{"command":"go test ./..."}}],isSidechain=True,agentId="w1"),
+             rec("user",[{"type":"tool_result","tool_use_id":"b1","content":"ok"}],isSidechain=True,agentId="w1")])
+    print(t.task_prompt(p)[:40]); print(t.tool_call_count(p))
+elif case=="fork":
+    # A fork opens with the PARENT's spawn: not the fork's work.
+    p=write([rec("assistant",[{"type":"tool_use","id":"s1","name":"Agent","input":{"prompt":"Do the thing."}}]),
+             rec("user",[{"type":"tool_result","tool_use_id":"s1","content":"Fork started"},{"type":"text","text":"<fork-boilerplate>You are a worker fork"}]),
+             rec("assistant",[{"type":"tool_use","id":"b1","name":"Bash","input":{"command":"ls"}}]),
+             rec("user",[{"type":"tool_result","tool_use_id":"b1","content":"a.go"}])])
+    w=t.tool_results(p); print(t.tool_call_count(p)); print(w[0].split(":")[0])
+TXPY
+}
+out=$(tx_py main_with_agent_result)
+check "provenance: a main session whose Agent RESULT names an agentId is still a main session" '[ "$out" = "False True" ]'
+out=$(tx_py delegating_worker)
+check "provenance: a delegating subagent is judged on its OWN brief, not its child's task" 'echo "$out" | head -1 | grep -q "Your tickets: MP-406"'
+check "provenance: an agent's own Agent calls count as work - delegation is not idleness" '[ "$(echo "$out" | tail -1)" = "2" ]'
+out=$(tx_py fork)
+check "provenance: a fork's work record and call count leave out the parent's spawn" '[ "$(echo "$out" | head -1)" = "1" ] && [ "$(echo "$out" | tail -1)" = "Bash" ]'
+
+
+# --- read-only fast path: the audit's bypasses (2026-09-21). Every one of
+# these took the SILENT fast path - never judged, never prompted - and several
+# were run by the auditor and did what they looked like they would not.
+ro() { python3 -c "import sys,importlib.util;sys.path.insert(0,'lib');s=importlib.util.spec_from_file_location('g','hooks/bash_risk_gate.py');g=importlib.util.module_from_spec(s);s.loader.exec_module(g);print(g.is_read_only(sys.argv[1]))" "$1"; }
+bypass_open=""
+while IFS= read -r c; do [ -n "$c" ] && [ "$(ro "$c")" = "True" ] && bypass_open="$bypass_open | $c"; done <<'CMDS'
+ls & rm -rf victim
+find victim -name "*.txt" -execdir rm {} +
+sed -n -i "1p" f.txt
+sed -ni '1p' f.txt
+sed -n '1w ~/.bashrc' x
+sed -n '1e rm -rf build' x
+git diff --output=victim.txt
+cat <(touch pwned)
+git branch --move main old
+git branch -f main HEAD~10
+git branch -Df feature
+git branch newfeature
+fd -e pyc -x rm
+rg --pre ./evil.sh foo
+yq -i '.a = 1' v.yaml
+go build -toolexec 'rm -rf build' ./...
+go env -w GOFLAGS=-x
+go build -o=/usr/local/bin/foo .
+git fetch --upload-pack='touch /tmp/p' .
+find . -fprint out.txt
+uniq in.txt out.txt
+helm template x . --post-renderer ./evil.sh
+CMDS
+check "fast path: none of the audit's write/delete/exec commands passes as read-only" '[ -z "$bypass_open" ] || { echo "   still open:$bypass_open"; false; }'
+lost=""
+while IFS= read -r c; do [ -n "$c" ] && [ "$(ro "$c")" = "False" ] && lost="$lost | $c"; done <<'CMDS'
+grep -n "func (s \*Server)\|TokenAddress" internal/api.go
+sed -n '10,20p' main.go
+sed -n '/func main/,/^}/p' main.go
+git branch --contains bc40ad1 2>/dev/null
+git branch -vv --sort=-committerdate
+sort f | uniq -c
+echo "=== a | b ; c ===" && git status
+cd ~/apps/x && git log --oneline -5 2>&1 | head
+CMDS
+check "fast path: real read-only commands keep it, quoted separators included" '[ -z "$lost" ] || { echo "   lost:$lost"; false; }'
+
+# OUTWARD asks without a judge. It missed every form below.
+ow() { python3 -c "import sys,importlib.util;sys.path.insert(0,'lib');s=importlib.util.spec_from_file_location('g','hooks/bash_risk_gate.py');g=importlib.util.module_from_spec(s);s.loader.exec_module(g);print(bool(g.OUTWARD.search(sys.argv[1])))" "$1"; }
+missed=""
+while IFS= read -r c; do [ -n "$c" ] && [ "$(ow "$c")" = "False" ] && missed="$missed | $c"; done <<'CMDS'
+kubectl -n prod delete deploy api
+kubectl --context mp apply -f k8s/
+terraform -chdir=infra apply
+git -C ../repo push
+make -C infra roll-apply
+npx wrangler deploy
+wrangler pages deploy dist
+env X=1 git push
+(git push)
+docker buildx build --push -t x .
+pnpm publish
+CMDS
+check "outward: global options, wrappers and subshells still ask" '[ -z "$missed" ] || { echo "   missed:$missed"; false; }'
+check "outward: a push on its own LINE still asks" '[ "$(ow "$(printf "git add -A\ngit push origin main")")" = "True" ]'
+check "outward: reading about deletes is not a delete" '[ "$(ow "kubectl get pods -o yaml | grep delete")" = "False" ] && [ "$(ow "git -C repo status")" = "False" ]'
 
 # The README states this number, and a number in prose drifts silently: it said
 # 111 while the suite ran 126, and the count of your own tests is the first

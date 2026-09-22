@@ -9,8 +9,9 @@ both the definition's `model:` and CLAUDE_CODE_SUBAGENT_MODEL, and PreToolUse
 2026-09-21: a spawn asking for `opus`, rewritten here, ran on
 claude-haiku-4-5 (the subagent transcript's own `message.model`).
 
-So: one Choice over the subagent's task, and the fork that greps for a file
-runs on haiku while the one that has to make a test pass keeps opus.
+So: one Choice over the subagent's task, and the worker that greps for a file
+runs on haiku while the one that has to make a test pass keeps opus. (Not a
+fork: a fork runs on its parent's model whatever its input says.)
 
 Routes only when the caller left `model` unset or `inherit` — an explicit
 model is a deliberate choice and is left alone unless JEV_HOOKS_ROUTER_FORCE=1.
@@ -27,6 +28,10 @@ spawn exactly as it was.
                              (default 0.7) — declining sends the spawn to the
                              parent's model, which is the expensive one
   JEV_HOOKS_ROUTER_FORCE=1   route even when the caller named a model
+  JEV_HOOKS_ROUTER_TYPES     subagent types to route (default general-purpose).
+                             A typed agent can define its own model, and a
+                             route beats that definition; a fork is never
+                             routed - it runs on its parent's model regardless
 """
 import json, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
@@ -34,10 +39,17 @@ import jev
 
 PROMPT_CHARS = 4_000
 DEFAULT_MODELS = ("haiku", "sonnet", "opus", "fable")
+DEFAULT_TYPES = ("general-purpose",)     # an unset subagent_type IS general-purpose
 
 # One definition of what each model is for, shared with the session-model hint
 # in prompt_routing so the two cannot drift.
 from models import CRITERIA, CHEAP, choose, envfloat, probabilities   # noqa: E402
+
+
+def routed_types():
+    raw = os.environ.get("JEV_HOOKS_ROUTER_TYPES")
+    names = [t.strip() for t in raw.split(",") if t.strip()] if raw else list(DEFAULT_TYPES)
+    return [t for t in names if t != "fork"]
 
 
 def allowed():
@@ -60,6 +72,24 @@ def main():
     ti = inp.get("tool_input") or {}
     task = (ti.get("prompt") or "").strip()
     if not task:
+        return
+    kind = (ti.get("subagent_type") or "general-purpose").strip()
+    # A fork runs on its parent's model whatever its input says. Observed
+    # 2026-09-21: rewritten to haiku here, the fork ran on claude-opus-5 and its
+    # own meta.json recorded "model": "inherit" — a fork shares the parent's
+    # context, and that pins its model. Routing one changed nothing except the
+    # decision log, which then recorded a route that never happened. Not even
+    # FORCE applies: there is nothing to force.
+    if kind == "fork":
+        debug("fork: runs on the parent's model regardless; not routed")
+        return
+    # A typed agent may carry its own `model:` - and a per-invocation model
+    # beats it. Observed the same day: claude-code-guide runs on haiku by
+    # definition, and this hook "routed" it UP to sonnet. Built-in definitions
+    # are not on disk to read, so only the untyped worker is routed unless told
+    # otherwise.
+    if kind not in routed_types():
+        debug(f"{kind}: may define its own model; not routed")
         return
     chosen = (ti.get("model") or "").strip().lower()
     if chosen and chosen != "inherit" and os.environ.get("JEV_HOOKS_ROUTER_FORCE") != "1":

@@ -129,7 +129,12 @@ BOILERPLATE = ("You've inherited the conversation context", "<fork-boilerplate>"
 # session, the check's "last user prompt" was one of these - three times its
 # own previous complaint - so `unanswered` judged a reply against the hook.
 HARNESS_PROMPTS = ("Stop hook feedback:", "[Your previous response had no visible output",
-                   "Another Claude session sent a message:")
+                   "Another Claude session sent a message:",
+                   # A background child's completion notice arrives as a user
+                   # record. It is not the user, and it is not a task.
+                   "[SYSTEM NOTIFICATION", "<task-notification>",
+                   # A model-invoked skill's body, injected as a user record.
+                   "Base directory for this skill:")
 
 
 def is_harness_prompt(text):
@@ -198,22 +203,54 @@ def _is_summary(text):
     return any(t.startswith(m) for m in SUMMARY_START)
 
 
-def is_subagent_transcript(path, lines=40):
-    """Whether this file is a subagent's own transcript rather than the parent
-    session's. A subagent's records carry agentId / isSidechain / parentSessionId
-    (a fork opens with a fork-context-ref record), and a fork's first prompt is
-    the harness's fork boilerplate. A parent transcript has none of these."""
+def _head_records(path, lines):
+    """The first `lines` records, parsed. Unparseable lines are skipped."""
+    out = []
     try:
         with open(path) as f:
             for n, line in enumerate(f):
                 if n >= lines:
                     break
-                if '"agentId"' in line or '"isSidechain": true' in line or '"isSidechain":true' in line \
-                        or '"parentSessionId"' in line or '"fork-context-ref"' in line \
-                        or any(b in line for b in BOILERPLATE):
-                    return True
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(r, dict):
+                    out.append(r)
     except Exception:
         pass
+    return out
+
+
+def _typed_text(r):
+    """What a user record says in its own voice - never a tool result, which
+    can quote anything, including another transcript's markers."""
+    c = (r.get("message") or {}).get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return "\n".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def is_subagent_transcript(path, lines=40):
+    """Whether this file is a subagent's own transcript rather than the parent
+    session's. Decided on a record's TOP-LEVEL keys: a subagent's records say
+    `isSidechain: true` and carry `agentId` (and `parentSessionId`), a fork
+    opens with a fork-context-ref record, and a fork's first prompt is the
+    harness's fork boilerplate.
+
+    Never by substring. Measured 2026-09-21: 11 of 595 real MAIN transcripts
+    matched `"agentId"` - it is written into a main session's own Agent tool
+    RESULTS (toolUseResult.agentId), on records that also say
+    `isSidechain: false` - and the verifier then judged each main session
+    against the last task it had delegated."""
+    for r in _head_records(path, lines):
+        if r.get("isSidechain") is True or r.get("agentId") or r.get("parentSessionId") \
+                or r.get("type") == "fork-context-ref":
+            return True
+        if r.get("type") == "user" and any(b in _typed_text(r) for b in BOILERPLATE):
+            return True
     return False
 
 
@@ -227,16 +264,7 @@ def is_main_session_transcript(path, lines=40):
     explicit `false` counts."""
     if is_subagent_transcript(path, lines):
         return False
-    try:
-        with open(path) as f:
-            for n, line in enumerate(f):
-                if n >= lines:
-                    break
-                if '"isSidechain": false' in line or '"isSidechain":false' in line:
-                    return True
-    except Exception:
-        pass
-    return False
+    return any(r.get("isSidechain") is False for r in _head_records(path, lines))
 
 
 def _summary_first(path):
@@ -346,12 +374,27 @@ def task_prompt(path):
         pass
     if first_call:
         _log_strategy("agent-call-before-first-prompt"); return first_call
-    if last_call:
-        if is_subagent_transcript(path) or _summary_first(path):
-            _log_strategy("last-agent-call-in-file"); return last_call
-        _log_strategy("parent-transcript"); return ""
-    prompts = [s["text"] for s in segments(path) if s["kind"] == "prompt" and not _is_summary(s["text"])]
+    prompts = [s["text"] for s in segments(path) if s["kind"] == "prompt" and not _is_summary(s["text"])
+               and not is_harness_prompt(s["text"])]
     prompts = [p for p in prompts if not any(b in p for b in BOILERPLATE)] or prompts
+    if last_call:
+        # A subagent that typed-in with its own brief and then delegated is
+        # judged on its OWN brief. Its last Agent call is its child's task:
+        # measured 2026-09-21, 19 real subagents took that path, one briefed on
+        # six tickets and judged against the one it handed down. The last call
+        # stands in only when there is no brief of its own to read - a
+        # compacted transcript that opens with a summary.
+        if is_subagent_transcript(path) and (_summary_first(path) or not prompts):
+            _log_strategy("last-agent-call-in-file"); return last_call
+        if not is_subagent_transcript(path):
+            if _summary_first(path):
+                _log_strategy("last-agent-call-in-file"); return last_call
+            _log_strategy("parent-transcript"); return ""
+    if prompts and is_subagent_transcript(path):
+        # A subagent's first prompt of its own IS its brief. Preferring a later
+        # prompt because it happens to contain a list picked a child's
+        # completion notice over a six-ticket brief (2026-09-21).
+        _log_strategy("subagent-brief"); return prompts[0]
     for p in prompts:
         if any(l.strip()[:2] in ("- ", "* ") or l.strip()[:1].isdigit() for l in p.splitlines()):
             _log_strategy("first-listed-prompt"); return p
@@ -373,7 +416,33 @@ def _log_strategy(name):
         pass
 
 
-def tool_results(path, chars=16_000, result_chars=400):
+def parent_spawn_ids(path):
+    """The ids of the PARENT's spawning Agent call(s): the ones a fork's
+    transcript opens with, before its first user record. Everything after that
+    is the agent's own doing - including Agent calls it made itself, which are
+    delegation, not idleness (an orchestrator with 11 delegations and one read
+    used to count as ONE call of work)."""
+    ids = set()
+    try:
+        with open(path) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                if r.get("type") == "user":
+                    break
+                c = (r.get("message") or {}).get("content")
+                if r.get("type") == "assistant" and isinstance(c, list):
+                    for b in c:
+                        if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "Agent":
+                            ids.add(b.get("id"))
+    except Exception:
+        pass
+    return ids
+
+
+def tool_results(path, chars=16_000, result_chars=400, after=-1):
     """What an agent ACTUALLY did: each call PAIRED with what it printed, oldest
     call first, as "Bash: go test ./...\n-> ok  pkg  1.2s".
 
@@ -398,7 +467,12 @@ def tool_results(path, chars=16_000, result_chars=400):
       earlier calls it left out.
     """
     pending, entries = {}, []
+    spawn = parent_spawn_ids(path)       # the parent's call, not this agent's work
     for s in segments(path):
+        if s.get("id") in spawn and s["kind"] in ("tool_use", "tool_result"):
+            continue
+        if s["i"] <= after:
+            continue                     # before the caller's cut-off (e.g. the prompt being answered)
         if s["kind"] == "tool_use":
             pending[s.get("id")] = len(entries)
             entries.append([s["text"], ""])
@@ -447,18 +521,14 @@ def tool_results(path, chars=16_000, result_chars=400):
     return out
 
 
-def tool_call_count(path, exclude=("Agent",)):
+def tool_call_count(path):
     """How many tools the agent invoked ITSELF. Zero means it did nothing,
     whatever its report says.
 
-    A fork's transcript opens with the PARENT's `Agent` call — the spawn, not
-    the child's work — so counting it made a do-nothing agent look busy and the
-    zero-work gate never fired."""
-    n = 0
-    for s in segments(path):
-        if s["kind"] != "tool_use":
-            continue
-        name = s["text"].split(":", 1)[0].strip()
-        if name not in exclude:
-            n += 1
-    return n
+    A fork's transcript opens with the PARENT's `Agent` call - the spawn, not
+    the child's work - and counting it made a do-nothing agent look busy. But
+    excluding every Agent call by name went too far the other way: an agent
+    that delegated was counted as idle, and the zero-work gate blocked an
+    orchestrator for doing its job. Only the parent's spawn is excluded."""
+    spawn = parent_spawn_ids(path)
+    return sum(1 for s in segments(path) if s["kind"] == "tool_use" and s.get("id") not in spawn)

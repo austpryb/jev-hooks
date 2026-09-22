@@ -109,17 +109,60 @@ def main():
     if not tool:
         return
     p = state_path(sid)
+    # The lock covers the read-modify-write ONLY, never the judge call. Held
+    # across jev.ask (up to ~14s with a retry), it made every parallel
+    # PostToolUse give up after its 1s wait and drop its pair - the window then
+    # showed Bash, Bash, Bash where Read and Grep had run between, and the next
+    # Bash call looked like a four-in-a-row repeat (audit 2026-09-21).
     with Locked(p) as lk:
         if not lk.ok:
             return                   # could not lock within 1s: skip this call, fail open
-        _judge(p, inp, tool)
+        last = _record(p, inp, tool)
+    if not last:
+        return                       # fast path: no judgment, no output
+    q = {"progress": jev.score(
+        "Looking at `attempts`, three consecutive calls of the same tool, is the latest attempt making progress compared with the earlier ones?",
+        ["No progress: the same failure, the same error text, or the same output again",
+         "A different attempt whose effect is unclear",
+         "Clear progress: the error changed to a later stage, a check now passes, or the output shows the intended change"])}
+    a = jev.ask({"tool": tool, "attempts": last}, q)
+    if not a:
+        return                       # judge unavailable: fail open
+    s = a["progress"]["score"]
+    with Locked(p) as lk:
+        if not lk.ok:
+            return
+        st = _load(p)
+        st["strikes"] = st.get("strikes", 0) + 1 if s < STRIKE_BELOW else 0
+        st["last_score"] = s
+        fire = st["strikes"] >= STRIKES
+        if fire:
+            st["strikes"] = 0        # say it once, then start counting again
+        _save(p, st)
+    if not fire:
+        jev.record("loop_detect", "counting", a, tool=tool, note=f"strikes={st.get('strikes', 0)}")
+        return
+    jev.record("loop_detect", "nudge", a, tool=tool)
+    err = next((x["result"] for x in reversed(last) if x["error"]), last[-1]["result"])
+    msg = f"jev-hooks: the last three {tool} calls made no progress ({clip(err, 160)})"
+    print(json.dumps({
+        "systemMessage": msg,
+        "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext":
+            msg + ". Change approach: do not run the same command again. Say in one sentence what you will do differently "
+            "(read the error's source, inspect state, or try a different tool), then do that."}}))
 
 
-def _judge(p, inp, tool):
+def _load(p):
     try:
-        st = json.load(open(p))
+        return json.load(open(p))
     except Exception:
-        st = {"pairs": [], "strikes": 0}
+        return {"pairs": [], "strikes": 0}
+
+
+def _record(p, inp, tool):
+    """Append this call to the window and save it. Returns the last three pairs
+    when they are worth a judgment, else None (and resets the strikes)."""
+    st = _load(p)
     rtext = summarise_response(inp.get("tool_response"))
     st["pairs"] = (st.get("pairs") or [])[-(KEEP - 1):] + [{
         "tool": tool, "input": summarise_input(tool, inp.get("tool_input")), "result": rtext,
@@ -136,35 +179,8 @@ def _judge(p, inp, tool):
         repeat = False
     if not repeat:
         st["strikes"] = 0
-        _save(p, st)
-        return                       # fast path: no judgment, no output
-    q = {"progress": jev.score(
-        "Looking at `attempts`, three consecutive calls of the same tool, is the latest attempt making progress compared with the earlier ones?",
-        ["No progress: the same failure, the same error text, or the same output again",
-         "A different attempt whose effect is unclear",
-         "Clear progress: the error changed to a later stage, a check now passes, or the output shows the intended change"])}
-    a = jev.ask({"tool": tool, "attempts": last}, q)
-    if not a:
-        _save(p, st)
-        return                       # judge unavailable: fail open
-    s = a["progress"]["score"]
-    st["strikes"] = st.get("strikes", 0) + 1 if s < STRIKE_BELOW else 0
-    st["last_score"] = s
-    fire = st["strikes"] >= STRIKES
-    if fire:
-        st["strikes"] = 0            # say it once, then start counting again
     _save(p, st)
-    if not fire:
-        jev.record("loop_detect", "counting", a, tool=tool, note=f"strikes={st.get('strikes', 0)}")
-        return
-    jev.record("loop_detect", "nudge", a, tool=tool)
-    err = next((x["result"] for x in reversed(last) if x["error"]), last[-1]["result"])
-    msg = f"jev-hooks: the last three {tool} calls made no progress ({clip(err, 160)})"
-    print(json.dumps({
-        "systemMessage": msg,
-        "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext":
-            msg + ". Change approach: do not run the same command again. Say in one sentence what you will do differently "
-            "(read the error's source, inspect state, or try a different tool), then do that."}}))
+    return last if repeat else None
 
 
 def _save(p, st):

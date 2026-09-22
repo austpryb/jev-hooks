@@ -70,6 +70,16 @@ def judge(batch):
 def main():
     inp = jev.read_stdin()
     path = inp.get("transcript_path"); sid = jev.safe_id(inp.get("session_id"))
+    # Every compaction yields a fresh keep-set or none, never a stale one. The
+    # file used to survive a later compaction that kept nothing or found the
+    # judge down, and sessionstart_reinject then told the model to honour a
+    # decision the user had since reversed ("use postgres", after "switch to
+    # mysql"). Cleared before any early exit, so a dead judge really does mean
+    # an ordinary compaction, as documented.
+    try:
+        os.remove(os.path.join(keep_dir(), f"{sid}.md"))
+    except OSError:
+        pass
     if not path or not os.environ.get("TYPESAFE_API_KEY"):
         return
     segs = [s for s in transcript.segments(path) if s["kind"] in ("prompt", "assistant") and len(s["text"]) >= MIN_SEGMENT_CHARS
