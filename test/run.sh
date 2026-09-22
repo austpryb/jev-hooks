@@ -1001,6 +1001,45 @@ check "outward: global options, wrappers and subshells still ask" '[ -z "$missed
 check "outward: a push on its own LINE still asks" '[ "$(ow "$(printf "git add -A\ngit push origin main")")" = "True" ]'
 check "outward: reading about deletes is not a delete" '[ "$(ow "kubectl get pods -o yaml | grep delete")" = "False" ] && [ "$(ow "git -C repo status")" = "False" ]'
 
+
+# --- claude-loadout: pick plugins, MCP servers and model before a session
+LH=$(mktemp -d)
+mkdir -p "$LH/.claude/plugins" "$LH/pa/.claude-plugin" "$LH/pb/.claude-plugin"
+echo '{"name":"a","description":"safety hooks"}' > "$LH/pa/.claude-plugin/plugin.json"
+echo '{"name":"b","description":"browser debugging","mcpServers":{"bsrv":{"command":"${CLAUDE_PLUGIN_ROOT}/run.sh"}}}' > "$LH/pb/.claude-plugin/plugin.json"
+cat > "$LH/.claude/plugins/installed_plugins.json" <<LJSON
+{"plugins":{"a@m":[{"installPath":"$LH/pa"}],"b@m":[{"installPath":"$LH/pb"}]}}
+LJSON
+echo '{"model":"opus","enabledPlugins":{"a@m":true,"b@m":false}}' > "$LH/.claude/settings.json"
+echo '{"mcpServers":{"s1":{"type":"http","url":"https://x/mcp","headers":{"Authorization":"Bearer SECRET-TOKEN"}},"s2":{"command":"s2"}}}' > "$LH/.claude.json"
+LO_BIN="$PWD/bin/claude-loadout"
+lo() { ( cd "$LH" && CLAUDE_LOADOUT_HOME="$LH" XDG_RUNTIME_DIR="$LH/run" python3 "$LO_BIN" "$@" ); }
+arg_of() { python3 -c "import json,sys;a=json.loads(sys.argv[1]);print(a[a.index(sys.argv[2])+1] if sys.argv[2] in a else '')" "$1" "$2"; }
+argc() { python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$1"; }
+
+out=$(lo --dry-run --yes)
+check "loadout: unchanged defaults start a bare claude, no flags" '[ "$(argc "$out")" = "1" ]'
+out=$(lo --dry-run -p hi); out2=$(lo --dry-run plugin list)
+check "loadout: -p and subcommands pass straight through, untouched" 'echo "$out" | grep -q "\"-p\", \"hi\"\]" && ! echo "$out" | grep -q -- --settings && echo "$out2" | grep -q "\"plugin\", \"list\"\]"'
+out=$(lo --dry-run --yes --pick-plugins "")
+check "loadout: unticking a plugin disables it for the session" 'arg_of "$out" --settings | grep -q "\"a@m\": false"'
+out=$(lo --dry-run --yes --pick-model fable); out2=$(lo --dry-run --yes --pick-model opus)
+check "loadout: a model pick becomes --model; the settings default adds nothing" '[ "$(arg_of "$out" --model)" = "fable" ] && ! echo "$out2" | grep -q -- --model'
+out=$(lo --dry-run --yes --pick-mcp s1)
+f=$(arg_of "$out" --mcp-config)
+check "loadout: dropping a server starts strict mode with only the kept ones" 'echo "$out" | grep -q -- --strict-mcp-config && python3 -c "import json,sys;d=json.load(open(sys.argv[1]))[\"mcpServers\"];sys.exit(0 if list(d)==[\"s1\"] else 1)" "$f"'
+check "loadout: server credentials go in a 0600 file, never on the command line" '[ "$(stat -c %a "$f")" = "600" ] && ! echo "$out" | grep -q SECRET-TOKEN'
+out=$(lo --dry-run --yes --pick-plugins a@m,b@m --pick-mcp s1)
+f=$(arg_of "$out" --mcp-config)
+check "loadout: strict mode keeps a chosen plugin's own servers, root resolved" 'python3 -c "import json,sys;d=json.load(open(sys.argv[1]))[\"mcpServers\"];sys.exit(0 if d.get(\"bsrv\",{}).get(\"command\")==sys.argv[2]+\"/pb/run.sh\" else 1)" "$f" "$LH"'
+# Jev may ADD a plugin a task clearly needs and pre-pick the model; it never removes one.
+out=$(lo --dry-run --yes --task "debug the blank page in the browser [model=pick:fable] [p0=yes]")
+check "loadout: Jev pre-picks the model and turns on a plugin the task needs" '[ "$(arg_of "$out" --model)" = "fable" ] && arg_of "$out" --settings | grep -q "\"b@m\": true"'
+check "loadout: Jev never turns off a plugin that is normally on" 'arg_of "$out" --settings | grep -q "\"a@m\": true"'
+out=$(TYPESAFE_API_KEY= lo --dry-run --yes --task "debug the blank page [model=pick:fable] [p0=yes]")
+check "loadout: no key, no pre-selection - defaults stand" '[ "$(argc "$out")" = "1" ]'
+rm -rf "$LH"
+
 # The README states this number, and a number in prose drifts silently: it said
 # 111 while the suite ran 126, and the count of your own tests is the first
 # claim a reader checks. So the suite asserts its own README rather than
