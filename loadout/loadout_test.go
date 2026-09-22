@@ -233,3 +233,24 @@ func TestShippedRegistryRanksEveryHook(t *testing.T) {
 		}
 	}
 }
+
+// The same plugin from another marketplace. The instruxi kit lists jev-hooks
+// as jev-hooks@instruxi; an exact-id check found neither its registry (so the
+// hooks page vanished) nor its switches (so JEV_HOOKS_DISABLE was dropped).
+func TestJevHooksFromAnotherMarketplace(t *testing.T) {
+	e := fixture(t)
+	ip := filepath.Join(e.Home, ".claude", "plugins", "installed_plugins.json")
+	b, _ := os.ReadFile(ip)
+	if err := os.WriteFile(ip, []byte(strings.ReplaceAll(string(b), "jev-hooks@jev-hooks", "jev-hooks@instruxi")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r := e.LoadRegistry(); !r.Available || len(r.Hooks) != 3 {
+		t.Fatalf("registry not found for jev-hooks@instruxi: %+v", r)
+	}
+	p, s := e.Plugins(), e.MCPServers()
+	_, env, _ := Build("claude", nil, p, s, Choice{Plugins: []string{"jev-hooks@instruxi"},
+		DisabledHooks: []string{"stop_check"}, MCP: all(s), KeepConnectors: true}, t.TempDir())
+	if len(env) != 1 || env[0] != "JEV_HOOKS_DISABLE=stop_check" {
+		t.Fatalf("hook switches lost for jev-hooks@instruxi: %v", env)
+	}
+}

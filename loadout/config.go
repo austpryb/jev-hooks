@@ -10,8 +10,23 @@ import (
 	"strings"
 )
 
-// JevHooksID is the plugin whose hooks can be switched off one by one.
+// JevHooksID is jev-hooks from its own marketplace. The plugin is the same
+// from any marketplace - the instruxi kit lists it as jev-hooks@instruxi - so
+// code asks isJevHooks / hasJevHooks, never compares against this id.
 const JevHooksID = "jev-hooks@jev-hooks"
+
+// isJevHooks reports whether a plugin id is jev-hooks, from any marketplace.
+func isJevHooks(id string) bool { return strings.HasPrefix(id, "jev-hooks@") }
+
+// hasJevHooks reports whether jev-hooks is among these plugin ids.
+func hasJevHooks(ids []string) bool {
+	for _, id := range ids {
+		if isJevHooks(id) {
+			return true
+		}
+	}
+	return false
+}
 
 // Plugin is one installed plugin and whether a plain `claude` here loads it.
 type Plugin struct {
@@ -236,7 +251,13 @@ func (e Env) APIKey() string {
 // LoadRegistry reads lib/registry.json from the installed jev-hooks.
 func (e Env) LoadRegistry() Registry {
 	r := Registry{HookDesc: map[string]string{}, Criteria: map[string]string{}}
-	root := e.installed()[JevHooksID]
+	root := ""
+	for id, path := range e.installed() {
+		if isJevHooks(id) {
+			root = path
+			break
+		}
+	}
 	b, err := os.ReadFile(filepath.Join(root, "lib", "registry.json"))
 	if err != nil {
 		return r

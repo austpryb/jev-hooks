@@ -151,7 +151,7 @@ func Interview(env Env, plugins []Plugin, servers map[string]json.RawMessage, re
 			ps = append(ps, strings.SplitN(id, "@", 2)[0])
 		}
 		fmt.Fprintf(&b, "Plugins: %s\n", orNone(strings.Join(ps, ", ")))
-		if contains(selPlugins, JevHooksID) && reg.Available {
+		if hasJevHooks(selPlugins) && reg.Available {
 			var off []string
 			for _, h := range reg.Hooks {
 				if !contains(selHooks, h) {
@@ -192,7 +192,7 @@ func Interview(env Env, plugins []Plugin, servers map[string]json.RawMessage, re
 		huh.NewGroup(
 			huh.NewMultiSelect[string]().Title("jev-hooks: which hooks run").Description(hookHelp).
 				Options(hookOptions...).Value(&selHooks).Height(len(hookOptions)+2),
-		).WithHideFunc(func() bool { return !reg.Available || !contains(selPlugins, JevHooksID) }),
+		).WithHideFunc(func() bool { return !reg.Available || !hasJevHooks(selPlugins) }),
 		huh.NewGroup(
 			huh.NewMultiSelect[string]().Title("MCP servers").
 				Description("Turning ANY off starts strict mode, which also drops the claude.ai connectors.\n"+help).
@@ -215,7 +215,7 @@ func Interview(env Env, plugins []Plugin, servers map[string]json.RawMessage, re
 		return Choice{}, huh.ErrUserAborted
 	}
 	c := Choice{Plugins: selPlugins, Model: model}
-	if contains(selPlugins, JevHooksID) && reg.Available {
+	if hasJevHooks(selPlugins) && reg.Available {
 		for _, h := range reg.Hooks {
 			if !contains(selHooks, h) {
 				c.DisabledHooks = append(c.DisabledHooks, h)
