@@ -37,7 +37,17 @@ HINTS = {
     "thinking_aloud": "jev-hooks: this reads as thinking aloud — respond to the idea; do not start work.",
 }
 
-WRAPPED = re.compile(r"^\s*(<[^>]+>[\s\S]*?</[^>]+>\s*)+$")
+# A prompt made entirely of <tag>...</tag> blocks (bash-input and the like) is
+# harness plumbing, not a message. This used to be one anchored regex,
+# ^\s*(<[^>]+>[\s\S]*?</[^>]+>\s*)+$, which backtracks EXPONENTIALLY when tag
+# blocks are followed by ordinary text - a pasted HTML list plus a question.
+# Measured 2026-09-21: 20 tags 0.73s, 24 tags ~15s, far past the 5s the harness
+# allows. Stripping matched pairs and checking what is left is linear enough.
+TAG_BLOCK = re.compile(r"<([A-Za-z][\w-]*)[^>]*>[\s\S]*?</\1>")
+
+
+def is_wrapped(p):
+    return TAG_BLOCK.sub("", p[:2 * PROMPT_CHARS]).strip() == "" and p.lstrip().startswith("<")
 
 
 def debug(msg):
@@ -73,11 +83,27 @@ def skill_names(cwd):
     return sorted(names)
 
 
-def repeated(sid, want):
-    """True when this session was already told to switch to `want` and has not
-    been told anything else since. Advice repeated every prompt is noise, and
-    the second telling never persuades anyone the first did not. Any failure
-    here counts as 'not repeated': the hint is cheap, losing it is fine."""
+def _hint_path(sid):
+    d = os.path.join(os.environ.get("CLAUDE_PLUGIN_DATA") or os.path.expanduser("~/.claude/jev-hooks"), "model_hint")
+    return os.path.join(d, f"{jev.safe_id(sid or 'unknown')}.json")
+
+
+def forget_hint(sid):
+    """The session is already on the model this hook would point at: whatever
+    it was told before has been acted on, so the next mismatch is news again."""
+    try:
+        os.remove(_hint_path(sid))
+    except OSError:
+        pass
+
+
+def repeated(sid, want, current):
+    """True when this session was already told to switch to `want` WHILE ON
+    `current`. Advice repeated every prompt is noise, and the second telling
+    never persuades anyone the first did not. But the state is keyed on the
+    model it was given on too: keyed on `want` alone, it never reset - a user
+    who took the advice and later moved off it was never told again for the
+    rest of the session. Any failure here counts as 'not repeated'."""
     d = os.environ.get("CLAUDE_PLUGIN_DATA") or os.path.expanduser("~/.claude/jev-hooks")
     d = os.path.join(d, "model_hint")
     try:
@@ -85,12 +111,12 @@ def repeated(sid, want):
         jev.prune(d)
         p = os.path.join(d, f"{jev.safe_id(sid or 'unknown')}.json")
         try:
-            last = json.load(open(p)).get("last")
+            st = json.load(open(p))
         except Exception:
-            last = None
-        if last == want:
+            st = {}
+        if st.get("last") == want and st.get("on") == current:
             return True
-        json.dump({"last": want}, open(p, "w"))
+        json.dump({"last": want, "on": current}, open(p, "w"))
     except Exception:
         return False
     return False
@@ -103,7 +129,7 @@ def main():
     if not isinstance(prompt, str):
         return
     p = prompt.strip()
-    if len(p) < MIN_CHARS or p.startswith("/") or WRAPPED.match(p):
+    if len(p) < MIN_CHARS or p.startswith("/") or is_wrapped(p):
         debug("skip")
         return
     state = {"prompt": p[:PROMPT_CHARS]}
@@ -118,7 +144,9 @@ def main():
                 "other": "greetings, status pings like 'keep going', pasted logs, anything that fits none of the above",
             }),
     }
-    hint_models = [m for m in os.environ.get("JEV_HOOKS_HINT_MODELS", ",".join(HINT_MODELS)).split(",")
+    # Strip BEFORE keeping: "opus, sonnet" kept " sonnet", CRITERIA[" sonnet"]
+    # raised, and the outer except swallowed every hint - kind and skill too.
+    hint_models = [m.strip() for m in os.environ.get("JEV_HOOKS_HINT_MODELS", ",".join(HINT_MODELS)).split(",")
                    if m.strip() in models.CRITERIA]
     current = models.alias_of(transcript.last_model(inp.get("transcript_path") or ""))
     if current and len(hint_models) > 1 and os.environ.get("JEV_HOOKS_HINT", "").lower() not in ("off", "0", "false"):
@@ -131,7 +159,9 @@ def main():
         crit = {n: None for n in skills}
         crit["none"] = "no listed skill is the right tool for this prompt, or the prompt is not about a task a skill covers"
         q["skill"] = jev.choice("Which listed skill, if any, is the right tool for `prompt`? Choose by the skill's name; choose none unless a name clearly matches what the prompt asks for.", crit)
-    a = jev.ask(state, q, retries=0)
+    # The harness kills this hook at 5s (hooks.json); the library default is 6s,
+    # so a slow answer arrived after the kill. Leave room for startup.
+    a = jev.ask(state, q, retries=0, timeout=3.5)
     if not a:
         return
     parts = []
@@ -144,7 +174,9 @@ def main():
     if a.get("model"):
         probs = models.probabilities(a["model"])
         want = models.choose(probs, hint_models, models.envfloat("JEV_HOOKS_HINT_MIN", HINT_MIN), 1.1)
-        if want and want != current and not repeated(inp.get("session_id"), want):
+        if want and want == current:
+            forget_hint(inp.get("session_id"))
+        if want and want != current and not repeated(inp.get("session_id"), want, current):
             parts.append(f"This reads as {models.CRITERIA[want].split(':')[0]} — {current} is running it; "
                          f"`/model {want}` fits better (p={float(probs.get(want) or 0):.2f}).")
     debug(f"ms={int((time.time() - t0) * 1000)} kind={k.get('choice')}:{k.get('confidence')} skill={s.get('choice')}:{s.get('confidence')}")

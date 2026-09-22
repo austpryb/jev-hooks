@@ -706,6 +706,49 @@ out=$(pr "$(pr_in 'Compare the two designs and recommend one. [model=pick:fable]
 check "hint: an unrecognised model is never reasoned about" '! echo "$out" | grep -q "/model"'
 rm -f "$TX" "$TXU"
 
+
+# --- audit 2026-09-21: prompt routing, compaction, stdin, loop lock, edit gate
+# A pasted HTML list used to hang the prompt hook for ~15s (exponential regex).
+t0=$(date +%s%N)
+out=$(printf '%s' "$(python3 -c 'import json;print(json.dumps({"prompt":"<li>a</li>"*24+" why is this list rendering twice? [kind=pick:question]","session_id":"rx","cwd":"/tmp/nowhere"}))')" | python3 hooks/prompt_routing.py)
+ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+check "routing: a pasted tag list does not hang the hook (${ms} ms)" '[ "$ms" -lt 3000 ]'
+check "routing: tags followed by a question are a message, not a wrapper" 'echo "$out" | grep -q "reads as a question"'
+
+# A space in the model list silenced EVERY hint via a swallowed KeyError.
+TXS=$(mktx claude-sonnet-5)
+out=$(JEV_HOOKS_HINT_MODELS="opus, sonnet" pr "$(pr_in 'Make the failing worker test pass. [kind=pick:question] [model=pick:opus]' "$TXS" sp1)")
+check "hint: spaces in JEV_HOOKS_HINT_MODELS do not silence the hook" 'echo "$out" | grep -q "/model opus" && echo "$out" | grep -q "reads as a question"'
+# The no-repeat state is keyed on the model it was given ON: once the user moves, it may come back.
+TXO=$(mktx claude-opus-5)
+pr "$(pr_in 'Make the failing worker test pass. [model=pick:opus]' "$TXS" rs)" >/dev/null
+pr "$(pr_in 'Make the failing worker test pass. [model=pick:opus]' "$TXO" rs)" >/dev/null
+out=$(pr "$(pr_in 'Make the failing worker test pass. [model=pick:opus]' "$TXS" rs)")
+check "hint: advice returns after the user moves off the model it recommended" 'echo "$out" | grep -q "/model opus"'
+rm -f "$TXS" "$TXO"
+
+# A later compaction that keeps nothing must not re-inject an earlier keep-set.
+printf '%s' "{\"session_id\":\"kk\",\"transcript_path\":\"$PWD/test/fixtures/session.jsonl\",\"hook_event_name\":\"PreCompact\",\"trigger\":\"auto\"}" | python3 hooks/precompact_triage.py
+had=$([ -s "$CLAUDE_PLUGIN_DATA/keep/kk.md" ] && echo yes)
+printf '%s' "{\"session_id\":\"kk\",\"transcript_path\":\"$PWD/test/fixtures/session.jsonl\",\"hook_event_name\":\"PreCompact\",\"trigger\":\"auto\"}" | TYPESAFE_BASE_URL=http://127.0.0.1:1 python3 hooks/precompact_triage.py
+out=$(printf '%s' '{"session_id":"kk","hook_event_name":"SessionStart","source":"compact"}' | python3 hooks/sessionstart_reinject.py)
+check "triage: a compaction with the judge down re-injects nothing stale" '[ "$had" = yes ] && [ -z "$out" ]'
+
+# Anything that is not a JSON object on stdin fails open, in every hook.
+crashed=""
+for h in hooks/*.py; do echo null | python3 "$h" >/dev/null 2>&1 || crashed="$crashed $h"; done
+check "stdin: null input fails open in every hook" '[ -z "$crashed" ] || { echo "   crashed:$crashed"; false; }'
+
+# NotebookEdit changes one cell; it is not a whole-file write.
+NB=$HOME/.cache/jevtest-nb-$$; mkdir -p "$NB" && ( cd "$NB" && git init -q && printf '{"cells":[]}' > nb.ipynb && git add -A && git -c user.email=t@t -c user.name=t commit -qm i && printf '{"cells":[1]}' > nb.ipynb )
+out=$(printf '%s' "{\"tool_name\":\"NotebookEdit\",\"tool_input\":{\"notebook_path\":\"$NB/nb.ipynb\",\"cell_id\":\"a\",\"new_source\":\"x\"}}" | python3 hooks/edit_risk_gate.py)
+check "edit gate: a one-cell NotebookEdit is not a whole-file replacement" '! echo "$out" | grep -q "replaces the whole"'
+# A committed symlink is judged by what it points at, not by its own git state.
+mkdir -p "$NB/out" && echo s > "$NB/out/.env" && mkdir -p "$NB/r" && ( cd "$NB/r" && git init -q && ln -s ../out/.env .env && git add -A && git -c user.email=t@t -c user.name=t commit -qm i )
+dbg=$(printf '%s' "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$NB/r/.env\",\"content\":\"x\"}}" | JEV_HOOKS_DEBUG=1 TYPESAFE_BASE_URL=http://127.0.0.1:1 python3 hooks/edit_risk_gate.py 2>&1)
+check "edit gate: a clean symlink to an unversioned file does not take the git-clean fast path" '! echo "$dbg" | grep -q "git clean"'
+rm -rf "$NB"
+
 # --- model router (hooks/model_router.py)
 # A hook cannot change the SESSION's model - no hook event carries one. A
 # subagent's it can: the Agent tool takes `model`, a per-invocation model beats

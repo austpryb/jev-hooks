@@ -442,7 +442,7 @@ def parent_spawn_ids(path):
     return ids
 
 
-def tool_results(path, chars=16_000, result_chars=400):
+def tool_results(path, chars=16_000, result_chars=400, after=-1):
     """What an agent ACTUALLY did: each call PAIRED with what it printed, oldest
     call first, as "Bash: go test ./...\n-> ok  pkg  1.2s".
 
@@ -471,6 +471,8 @@ def tool_results(path, chars=16_000, result_chars=400):
     for s in segments(path):
         if s.get("id") in spawn and s["kind"] in ("tool_use", "tool_result"):
             continue
+        if s["i"] <= after:
+            continue                     # before the caller's cut-off (e.g. the prompt being answered)
         if s["kind"] == "tool_use":
             pending[s.get("id")] = len(entries)
             entries.append([s["text"], ""])

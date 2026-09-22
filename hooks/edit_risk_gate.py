@@ -106,7 +106,10 @@ def main():
     path, removing, adding = change(tool, inp.get("tool_input") or {})
     if not path:
         return
-    ap = os.path.abspath(path)
+    # The file the write LANDS on. A committed symlink is "git clean" while its
+    # target - outside any repo - is the file destroyed (audit 2026-09-21: a
+    # tracked `.env` link to ../precious/.env took the clean fast path).
+    ap = os.path.realpath(path)
     if ap.startswith(SCRATCH) or "/scratchpad/" in ap:
         debug("fast-path: scratch"); return
     if not os.path.exists(ap):
@@ -114,7 +117,10 @@ def main():
     state = git_state(ap)
     if state == "clean":
         debug("fast-path: git clean"); return         # `git checkout --` restores it
-    if state == "modified" and tool in ("Write", "NotebookEdit"):
+    # Write only. NotebookEdit changes ONE cell, and a notebook is "modified"
+    # the moment its outputs change, so this asked on nearly every cell edit
+    # with a false "replaces the whole of" reason.
+    if state == "modified" and tool == "Write":
         # A fact, not a judgment: replacing the whole of a file that has uncommitted
         # changes destroys those changes and no commit holds them. Live runs on
         # 2026-09-19 scored this 0.54 and then 0.46 on identical input — Jev reads

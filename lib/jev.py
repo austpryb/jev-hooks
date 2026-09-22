@@ -87,8 +87,9 @@ def score(instructions, levels):
     return {"type": "score", "instructions": instructions, "criteria": levels}
 
 
-def ask(state, questions, retries=1):
-    """Returns {id: answer} or None. Never raises."""
+def ask(state, questions, retries=1, timeout=None):
+    """Returns {id: answer} or None. Never raises. `timeout` overrides the
+    module default for a hook whose harness budget is shorter than it."""
     key = os.environ.get("TYPESAFE_API_KEY")
     if not key or not questions:
         return None
@@ -98,7 +99,7 @@ def ask(state, questions, retries=1):
     t0 = time.time()
     for attempt in range(retries + 1):
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            with urllib.request.urlopen(req, timeout=timeout or TIMEOUT) as r:
                 out = json.loads(r.read())
                 _log(len(body), out.get("usage"), time.time() - t0, "ok")
                 return out.get("answers") or None
@@ -190,7 +191,11 @@ def _log(nbytes, usage, secs, outcome):
 
 
 def read_stdin():
+    """The hook event, or {}. Anything that is not a JSON OBJECT is {} too:
+    `null` or a list used to reach `.get()` in a hook with no guard of its own
+    and crash it with exit 1 instead of failing open."""
     try:
-        return json.load(sys.stdin)
+        v = json.load(sys.stdin)
     except Exception:
         return {}
+    return v if isinstance(v, dict) else {}
