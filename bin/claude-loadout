@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""Pick this session's plugins, MCP servers and model, then start Claude Code.
+
+    claude-loadout [claude args...]
+
+Plugins load at startup and no hook can change them once a session runs, so
+the choice has to be made BEFORE `claude` starts. This asks, then execs the
+real `claude` with the answer:
+
+  plugins  -> --settings '{"enabledPlugins": {...}}'   (a flag setting beats
+              user settings: verified, jev-hooks logged "enabled=false; will
+              NOT register" under it)
+  model    -> --model <alias>
+  MCP      -> nothing when every server stays on; otherwise --strict-mcp-config
+              plus a 0600 file listing the kept servers. Strict mode starts ONLY
+              what is listed, and the claude.ai connectors cannot be listed -
+              they are proxied through the account - so turning any local server
+              off drops them for the session. The screen says so first.
+
+A one-line task description is optional. Given one, and a TYPESAFE_API_KEY,
+Jev pre-selects the model (the same criteria the subagent router uses) and may
+tick a plugin that is normally off when the task clearly needs it. It never
+unticks anything: a safety hook should not vanish because a task description
+did not mention it.
+
+Only a bare, interactive launch is interviewed. Subcommands, -p/--print,
+--resume/--continue, --help/--version, a non-terminal, or CLAUDE_NO_INTERVIEW=1
+pass straight through. Cancelling any screen starts Claude with your normal
+defaults - this never stands between you and a session.
+
+Scripting and tests (no UI):
+    claude-loadout --dry-run --yes [--task T] [--pick-plugins a,b] [--pick-mcp x,y] [--pick-model m] [args]
+prints the argv it would exec, as JSON.
+"""
+import json, os, shutil, subprocess, sys, tempfile, time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "..", "lib"))
+
+HOME = os.environ.get("CLAUDE_LOADOUT_HOME") or os.path.expanduser("~")
+CLAUDE_DIR = os.path.join(HOME, ".claude")
+
+# Subcommands and flags that mean "not an interactive session start".
+PASSTHROUGH_WORDS = {"plugin", "plugins", "mcp", "config", "update", "doctor", "install", "migrate-installer",
+                     "setup-token", "auth", "login", "logout", "agents", "api-key", "help"}
+PASSTHROUGH_FLAGS = {"-p", "--print", "-r", "--resume", "-c", "--continue", "-h", "--help", "-v", "--version",
+                     "--settings", "--model", "--mcp-config", "--strict-mcp-config", "--output-format",
+                     "--input-format", "--from-pr", "--teleport"}
+MODEL_CHOICES = ["opus", "opus[1m]", "fable", "sonnet", "haiku"]
+CONNECTORS = "claude.ai connectors"
+
+
+def load(path, default=None):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def should_interview(argv, env=os.environ, tty=None):
+    if env.get("CLAUDE_NO_INTERVIEW") == "1":
+        return False
+    if tty is None:
+        tty = sys.stdin.isatty() and sys.stdout.isatty()
+    if not tty:
+        return False
+    if argv and argv[0] in PASSTHROUGH_WORDS:
+        return False
+    return not any(a.split("=", 1)[0] in PASSTHROUGH_FLAGS for a in argv)
+
+
+def ancestors(cwd):
+    """cwd and every parent up to /, nearest first."""
+    out, d = [], os.path.abspath(cwd)
+    while True:
+        out.append(d)
+        up = os.path.dirname(d)
+        if up == d:
+            return out
+        d = up
+
+
+def plugins(cwd):
+    """[(id, description, on_by_default)] for every installed plugin. The
+    default is what a plain `claude` here would load: user settings, then
+    project and local settings from the farthest ancestor to the nearest."""
+    installed = (load(os.path.join(CLAUDE_DIR, "plugins", "installed_plugins.json"), {}) or {}).get("plugins") or {}
+    enabled = dict((load(os.path.join(CLAUDE_DIR, "settings.json"), {}) or {}).get("enabledPlugins") or {})
+    for d in reversed(ancestors(cwd)):
+        if d == HOME:
+            continue                 # ~/.claude/settings.json is the USER file, already read
+        for name in ("settings.json", "settings.local.json"):
+            enabled.update((load(os.path.join(d, ".claude", name), {}) or {}).get("enabledPlugins") or {})
+    out = []
+    for pid, versions in sorted(installed.items()):
+        path = (versions or [{}])[0].get("installPath") or ""
+        desc = (load(os.path.join(path, ".claude-plugin", "plugin.json"), {}) or {}).get("description") or ""
+        out.append((pid, desc, bool(enabled.get(pid, False))))
+    return out
+
+
+def mcp_servers(cwd):
+    """{name: config} Claude Code would start here from local config: user scope
+    in ~/.claude.json, that file's per-project entries for cwd and its parents,
+    and .mcp.json files. Plugin-provided servers follow their plugin's toggle."""
+    cfg = load(os.path.join(HOME, ".claude.json"), {}) or {}
+    servers = dict(cfg.get("mcpServers") or {})
+    projects = cfg.get("projects") or {}
+    for d in reversed(ancestors(cwd)):
+        servers.update((projects.get(d) or {}).get("mcpServers") or {})
+        servers.update((load(os.path.join(d, ".mcp.json"), {}) or {}).get("mcpServers") or {})
+    return servers
+
+
+def plugin_servers(pid):
+    """The MCP servers an installed plugin declares - in .claude-plugin/plugin.json
+    (inline, or a path to a JSON file) or a root .mcp.json - with
+    ${CLAUDE_PLUGIN_ROOT} resolved. Strict mode starts only what the file lists,
+    and that drops plugin servers too (verified: chrome-devtools enabled, its
+    server never started), so a kept plugin's servers are copied in."""
+    installed = (load(os.path.join(CLAUDE_DIR, "plugins", "installed_plugins.json"), {}) or {}).get("plugins") or {}
+    root = ((installed.get(pid) or [{}])[0]).get("installPath") or ""
+    if not root:
+        return {}
+    decl = (load(os.path.join(root, ".claude-plugin", "plugin.json"), {}) or {}).get("mcpServers")
+    if isinstance(decl, str):
+        decl = (load(os.path.join(root, decl), {}) or {}).get("mcpServers", load(os.path.join(root, decl), {}))
+    if not isinstance(decl, dict):
+        decl = (load(os.path.join(root, ".mcp.json"), {}) or {}).get("mcpServers") or {}
+    text = json.dumps(decl).replace("${CLAUDE_PLUGIN_ROOT}", root)
+    return json.loads(text) if isinstance(decl, dict) else {}
+
+
+def default_model():
+    return (load(os.path.join(CLAUDE_DIR, "settings.json"), {}) or {}).get("model") or "default"
+
+
+def preselect(task, plugin_list):
+    """Jev's picks for a task: a model alias or None, and the ids of plugins that
+    are normally OFF but the task clearly needs. Never raises; None/[] when the
+    judge is unavailable."""
+    if not task.strip() or not os.environ.get("TYPESAFE_API_KEY"):
+        return None, []
+    try:
+        import jev, models
+    except Exception:
+        return None, []
+    off = [(pid, desc) for pid, desc, on in plugin_list if not on]
+    q = {"model": jev.choice(
+        "Which model should do `task`? Judge the WORK it asks for, not how long the text is.",
+        {m: models.CRITERIA[m] for m in ("opus", "fable", "sonnet", "haiku")})}
+    for i, (pid, desc) in enumerate(off):
+        q[f"p{i}"] = jev.noul(f"Would `task` clearly USE the plugin `{pid}`: {desc[:300]}?",
+                              true="the task is squarely what this plugin exists for",
+                              false="the task is unrelated, or would only possibly touch it")
+    a = jev.ask({"task": task[:2000]}, q, retries=0, timeout=4)
+    if not a:
+        return None, []
+    pick = models.choose(models.probabilities(a.get("model")), ["opus", "fable", "sonnet", "haiku"], 0.5, 1.1)
+    add = [pid for i, (pid, _) in enumerate(off) if float((a.get(f"p{i}") or {}).get("noul") or 0) >= 0.7]
+    return pick, add
+
+
+def build_argv(argv, plugin_list, chosen_plugins, servers, chosen_mcp, keep_connectors, model, runtime_dir):
+    """The claude argv for a loadout. Flags only where the choice differs from
+    what a plain `claude` would do anyway."""
+    out = ["claude"]
+    if any((pid in chosen_plugins) != on for pid, _, on in plugin_list):
+        out += ["--settings", json.dumps({"enabledPlugins": {pid: pid in chosen_plugins for pid, _, _ in plugin_list}})]
+    if model and model != "default":
+        out += ["--model", model]
+    if set(chosen_mcp) != set(servers) or not keep_connectors:
+        os.makedirs(runtime_dir, mode=0o700, exist_ok=True)
+        for old in os.listdir(runtime_dir):              # a day is long enough for any session to have read its file
+            p = os.path.join(runtime_dir, old)
+            try:
+                if time.time() - os.path.getmtime(p) > 86400:
+                    os.remove(p)
+            except OSError:
+                pass
+        kept = {}
+        for pid in chosen_plugins:                        # strict drops plugin servers unless listed
+            kept.update(plugin_servers(pid))
+        kept.update({n: servers[n] for n in chosen_mcp if n in servers})
+        fd, path = tempfile.mkstemp(prefix="mcp-", suffix=".json", dir=runtime_dir)
+        with os.fdopen(fd, "w") as f:                    # mkstemp is 0600: server configs carry tokens
+            json.dump({"mcpServers": kept}, f)
+        out += ["--strict-mcp-config", "--mcp-config", path]
+    return out + list(argv)
+
+
+def whiptail(args):
+    """Run a whiptail screen; its answer comes back on stderr. None on cancel."""
+    r = subprocess.run(["whiptail", "--title", "claude loadout"] + args, stderr=subprocess.PIPE, text=True)
+    return None if r.returncode != 0 else r.stderr.strip()
+
+
+def interview(cwd, plugin_list, servers):
+    task = whiptail(["--inputbox", "What are you working on? (optional - Enter to skip)", "9", "74", ""])
+    if task is None:
+        return None
+    pick, add = preselect(task, plugin_list)
+    rows = []
+    for pid, desc, on in plugin_list:
+        tag = "  (Jev: this task needs it)" if pid in add else ""
+        rows += [pid, (desc[:52] + tag) or "-", "ON" if (on or pid in add) else "OFF"]
+    got = whiptail(["--separate-output", "--checklist", "Plugins for this session (space toggles)", "20", "78", "10"] + rows)
+    if got is None:
+        return None
+    chosen_plugins = got.split("\n") if got else []
+    rows = [CONNECTORS, "Gmail, Drive, Calendar, Docs, ... (your claude.ai account)", "ON"]
+    for name, c in sorted(servers.items()):
+        rows += [name, (c.get("url") or c.get("command") or c.get("type") or "-")[:52] or "-", "ON"]
+    got = whiptail(["--separate-output", "--checklist",
+                    "MCP servers. Turning ANY of these off starts strict mode, which also drops the "
+                    "claude.ai connectors for this session.", "20", "78", "10"] + rows)
+    if got is None:
+        return None
+    picked = got.split("\n") if got else []
+    chosen_mcp = [n for n in picked if n != CONNECTORS]
+    keep_connectors = CONNECTORS in picked and set(chosen_mcp) == set(servers)
+    base = default_model()
+    pre = pick or base
+    rows = [base if base != "default" else "default", "your settings default", "ON" if pre == base else "OFF"]
+    try:
+        import models
+        blurb = {m: models.CRITERIA[m.split("[")[0]].split(":")[0] for m in MODEL_CHOICES}
+    except Exception:
+        blurb = {m: "" for m in MODEL_CHOICES}
+    for m in MODEL_CHOICES:
+        if m != base:
+            rows += [m, (blurb[m][:48] + ("  (Jev)" if m == pick else "")), "ON" if m == pre else "OFF"]
+    model = whiptail(["--radiolist", "Model for this session", "16", "78", "6"] + rows)
+    if model is None:
+        return None
+    return chosen_plugins, chosen_mcp, keep_connectors, model
+
+
+def main(argv):
+    own, rest, i = {}, [], 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--dry-run", "--yes"):
+            own[a] = True
+        elif a in ("--task", "--pick-plugins", "--pick-mcp", "--pick-model") and i + 1 < len(argv):
+            own[a] = argv[i + 1]; i += 1
+        else:
+            rest.append(a)
+        i += 1
+    real = shutil.which("claude") or "claude"
+    cwd = os.getcwd()
+    scripted = own.get("--yes")
+    if not scripted and not should_interview(rest):
+        return launch([real] + rest, own)
+    plugin_list, servers = plugins(cwd), mcp_servers(cwd)
+    if scripted:
+        pick, add = preselect(own.get("--task", ""), plugin_list)
+        chosen_plugins = own["--pick-plugins"].split(",") if "--pick-plugins" in own else \
+            [pid for pid, _, on in plugin_list if on or pid in add]
+        chosen_mcp = [n for n in own["--pick-mcp"].split(",") if n] if "--pick-mcp" in own else list(servers)
+        keep_connectors = "--pick-mcp" not in own
+        model = own.get("--pick-model") or pick or default_model()
+    else:
+        if not shutil.which("whiptail"):
+            return launch([real] + rest, own)
+        got = interview(cwd, plugin_list, servers)
+        if got is None:                                   # cancelled: normal defaults, no flags
+            return launch([real] + rest, own)
+        chosen_plugins, chosen_mcp, keep_connectors, model = got
+    if model == default_model():
+        model = "default"
+    runtime = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or os.path.join(HOME, ".cache"), "claude-loadout")
+    argv2 = build_argv(rest, plugin_list, chosen_plugins, servers, chosen_mcp, keep_connectors, model, runtime)
+    argv2[0] = real
+    if not own.get("--dry-run"):
+        mcp_note = "all" if "--strict-mcp-config" not in argv2 else (", ".join(chosen_mcp) or "none") + " (strict)"
+        sys.stderr.write(f"loadout: model {model} · plugins {', '.join(p.split('@')[0] for p in chosen_plugins) or 'none'}"
+                         f" · mcp {mcp_note}\n")
+    return launch(argv2, own)
+
+
+def launch(argv, own):
+    if own.get("--dry-run"):
+        print(json.dumps(argv))
+        return 0
+    os.execv(argv[0], argv) if os.path.isabs(argv[0]) else os.execvp(argv[0], argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

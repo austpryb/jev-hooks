@@ -329,6 +329,45 @@ two licence rules — never build a pass-through, never publish a comparison
 against another model. An agent handed "use Jev for X" without it will get at
 least one of those wrong.
 
+## Choosing a session's loadout: `claude-loadout`
+
+Plugins load at startup, and no hook can change them once a session runs. So
+the choice happens before: `bin/claude-loadout` asks which plugins, MCP servers
+and model this session gets, then starts the real `claude` with the answer.
+
+- **Plugins** become `--settings '{"enabledPlugins": {...}}'`. A flag setting
+  beats your user settings: under it a user-enabled plugin logs
+  `enabled=false; will NOT register`.
+- **Model** becomes `--model <alias>`.
+- **MCP servers**: leave them all on and nothing is added. Turn any off and it
+  starts `--strict-mcp-config` with a `0600` file of the kept servers (their
+  configs can carry tokens, so they never go on the command line). Strict mode
+  starts ONLY what is listed. The claude.ai connectors cannot be listed, since
+  they are proxied through your account, so turning any server off drops them
+  for that session. The screen says so. A kept plugin's own servers are copied
+  into the file, because strict mode drops those too.
+
+A one-line task description is optional. Given one, Jev pre-selects the model,
+using the same criteria as the subagent router, and may tick a plugin that is
+normally off when the task clearly needs it. It never unticks one, so a safety
+hook does not vanish because a task description left it out.
+
+Only a bare, interactive launch is interviewed. Subcommands, `-p`,
+`--resume`/`--continue` and a non-terminal pass straight through, and so does
+`CLAUDE_NO_INTERVIEW=1`. Cancelling any screen starts Claude with your normal
+defaults. The screens use `whiptail`; without it, `claude` starts as usual.
+
+To make a bare `claude` ask, put this in `~/.bashrc`. It resolves the installed
+plugin on every launch, so a plugin update takes effect without editing it:
+
+```sh
+claude() {
+  local l; l="$(jq -r '.plugins["jev-hooks@jev-hooks"][0].installPath // empty' \
+      ~/.claude/plugins/installed_plugins.json 2>/dev/null)/bin/claude-loadout"
+  if [ -x "$l" ]; then "$l" "$@"; else command claude "$@"; fi
+}
+```
+
 ## What the hooks decided, and tuning them with it
 
 Every hook records its own verdict next to what the call cost, to
@@ -396,7 +435,7 @@ their terms before enabling this on a repository whose prompts are sensitive.
 ## Test
 
 ```bash
-bash test/run.sh      # 211 checks against a local stub; no key, no network
+bash test/run.sh      # 221 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),
