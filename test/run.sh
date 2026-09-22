@@ -852,6 +852,48 @@ out=$(stopin "All 212 integration tests pass. [promise=no] [unanswered=no] [unve
 check "stop check: a block tells the USER how to dispute it" 'echo "$out" | python3 -c "import json,sys;d=json.load(sys.stdin);sys.exit(0 if \"bin/wrong.py stop_check\" in d.get(\"systemMessage\",\"\") else 1)"'
 check "stop check: the dispute command is not in the reason the model reads" 'echo "$out" | python3 -c "import json,sys;d=json.load(sys.stdin);sys.exit(0 if \"wrong.py\" not in d[\"reason\"] else 1)"'
 
+
+# --- transcript provenance (audit 2026-09-21)
+tx_py() { python3 - "$@" <<'TXPY'
+import json,sys,tempfile
+sys.path.insert(0,'lib'); import transcript as t
+def rec(typ,c,**kw):
+    r={"type":typ,"message":{"role":typ,"content":c}}; r.update(kw); return json.dumps(r)
+def write(L):
+    f=tempfile.NamedTemporaryFile("w",suffix=".jsonl",delete=False); f.write("\n".join(L)+"\n"); f.close(); return f.name
+case=sys.argv[1]
+if case=="main_with_agent_result":
+    # A MAIN session: isSidechain false, and its own Agent call's RESULT carries agentId.
+    p=write([rec("user","Investigate the dart sdk.",isSidechain=False),
+             rec("assistant",[{"type":"tool_use","id":"a1","name":"Agent","input":{"prompt":"Investigate X"}}],isSidechain=False),
+             rec("user",[{"type":"tool_result","tool_use_id":"a1","content":"done"}],isSidechain=False,toolUseResult={"agentId":"ab7ef882"})])
+    print(t.is_subagent_transcript(p), t.is_main_session_transcript(p))
+elif case=="delegating_worker":
+    # A subagent with its own brief that then delegates, and gets a child's notice back.
+    p=write([rec("user","Your tickets: MP-406, MP-407, MP-408. Ship all three.",isSidechain=True,agentId="w1"),
+             rec("assistant",[{"type":"tool_use","id":"c1","name":"Agent","input":{"prompt":"You own ONLY ticket MP-407."}}],isSidechain=True,agentId="w1"),
+             rec("user",[{"type":"tool_result","tool_use_id":"c1","content":"launched"}],isSidechain=True,agentId="w1"),
+             rec("user","[SYSTEM NOTIFICATION - NOT USER INPUT]\n1. child finished\n2. see output",isSidechain=True,agentId="w1"),
+             rec("assistant",[{"type":"tool_use","id":"b1","name":"Bash","input":{"command":"go test ./..."}}],isSidechain=True,agentId="w1"),
+             rec("user",[{"type":"tool_result","tool_use_id":"b1","content":"ok"}],isSidechain=True,agentId="w1")])
+    print(t.task_prompt(p)[:40]); print(t.tool_call_count(p))
+elif case=="fork":
+    # A fork opens with the PARENT's spawn: not the fork's work.
+    p=write([rec("assistant",[{"type":"tool_use","id":"s1","name":"Agent","input":{"prompt":"Do the thing."}}]),
+             rec("user",[{"type":"tool_result","tool_use_id":"s1","content":"Fork started"},{"type":"text","text":"<fork-boilerplate>You are a worker fork"}]),
+             rec("assistant",[{"type":"tool_use","id":"b1","name":"Bash","input":{"command":"ls"}}]),
+             rec("user",[{"type":"tool_result","tool_use_id":"b1","content":"a.go"}])])
+    w=t.tool_results(p); print(t.tool_call_count(p)); print(w[0].split(":")[0])
+TXPY
+}
+out=$(tx_py main_with_agent_result)
+check "provenance: a main session whose Agent RESULT names an agentId is still a main session" '[ "$out" = "False True" ]'
+out=$(tx_py delegating_worker)
+check "provenance: a delegating subagent is judged on its OWN brief, not its child's task" 'echo "$out" | head -1 | grep -q "Your tickets: MP-406"'
+check "provenance: an agent's own Agent calls count as work - delegation is not idleness" '[ "$(echo "$out" | tail -1)" = "2" ]'
+out=$(tx_py fork)
+check "provenance: a fork's work record and call count leave out the parent's spawn" '[ "$(echo "$out" | head -1)" = "1" ] && [ "$(echo "$out" | tail -1)" = "Bash" ]'
+
 # The README states this number, and a number in prose drifts silently: it said
 # 111 while the suite ran 126, and the count of your own tests is the first
 # claim a reader checks. So the suite asserts its own README rather than
