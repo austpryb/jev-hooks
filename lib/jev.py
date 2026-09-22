@@ -190,19 +190,17 @@ def _log(nbytes, usage, secs, outcome):
         pass
 
 
-# Every hook by the name it logs under, with what it does in a phrase short
-# enough for a terminal checklist. bin/claude-loadout offers these one by one.
-HOOKS = {
-    "bash_gate": "asks before risky or outward shell commands",
-    "edit_gate": "asks before a write git cannot undo",
-    "narrow": "trims bulky output before it enters context",
-    "model_router": "picks the model each subagent runs on",
-    "loop_detect": "notices a tool call going nowhere",
-    "stop_check": "stops unverified claims and empty promises",
-    "subagent_verify": "checks a subagent's report against its work",
-    "triage": "keeps decisions across compaction",
-    "prompt_routing": "question/approval hints and model advice",
-}
+# Every hook by the name it logs under, with a phrase for a terminal checklist.
+# Defined once in registry.json, which the claude-loadout binary also reads.
+def _registry():
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "registry.json")) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+HOOKS = _registry().get("hooks") or {}
 
 
 def disabled(name):

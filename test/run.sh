@@ -1002,46 +1002,9 @@ check "outward: a push on its own LINE still asks" '[ "$(ow "$(printf "git add -
 check "outward: reading about deletes is not a delete" '[ "$(ow "kubectl get pods -o yaml | grep delete")" = "False" ] && [ "$(ow "git -C repo status")" = "False" ]'
 
 
-# --- claude-loadout: pick plugins, MCP servers and model before a session
-LH=$(mktemp -d)
-mkdir -p "$LH/.claude/plugins" "$LH/pa/.claude-plugin" "$LH/pb/.claude-plugin"
-echo '{"name":"a","description":"safety hooks"}' > "$LH/pa/.claude-plugin/plugin.json"
-echo '{"name":"b","description":"browser debugging","mcpServers":{"bsrv":{"command":"${CLAUDE_PLUGIN_ROOT}/run.sh"}}}' > "$LH/pb/.claude-plugin/plugin.json"
-cat > "$LH/.claude/plugins/installed_plugins.json" <<LJSON
-{"plugins":{"a@m":[{"installPath":"$LH/pa"}],"b@m":[{"installPath":"$LH/pb"}]}}
-LJSON
-echo '{"model":"opus","enabledPlugins":{"a@m":true,"b@m":false}}' > "$LH/.claude/settings.json"
-echo '{"mcpServers":{"s1":{"type":"http","url":"https://x/mcp","headers":{"Authorization":"Bearer SECRET-TOKEN"}},"s2":{"command":"s2"}}}' > "$LH/.claude.json"
-LO_BIN="$PWD/bin/claude-loadout"
-lo() { ( cd "$LH" && CLAUDE_LOADOUT_HOME="$LH" XDG_RUNTIME_DIR="$LH/run" python3 "$LO_BIN" "$@" ); }
-arg_of() { python3 -c "import json,sys;a=json.loads(sys.argv[1]);print(a[a.index(sys.argv[2])+1] if sys.argv[2] in a else '')" "$1" "$2"; }
-argc() { python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$1"; }
-
-out=$(lo --dry-run --yes)
-check "loadout: unchanged defaults start a bare claude, no flags" '[ "$(argc "$out")" = "1" ]'
-out=$(lo --dry-run -p hi); out2=$(lo --dry-run plugin list)
-check "loadout: -p and subcommands pass straight through, untouched" 'echo "$out" | grep -q "\"-p\", \"hi\"\]" && ! echo "$out" | grep -q -- --settings && echo "$out2" | grep -q "\"plugin\", \"list\"\]"'
-out=$(lo --dry-run --yes --pick-plugins "")
-check "loadout: unticking a plugin disables it for the session" 'arg_of "$out" --settings | grep -q "\"a@m\": false"'
-out=$(lo --dry-run --yes --pick-model fable); out2=$(lo --dry-run --yes --pick-model opus)
-check "loadout: a model pick becomes --model; the settings default adds nothing" '[ "$(arg_of "$out" --model)" = "fable" ] && ! echo "$out2" | grep -q -- --model'
-out=$(lo --dry-run --yes --pick-mcp s1)
-f=$(arg_of "$out" --mcp-config)
-check "loadout: dropping a server starts strict mode with only the kept ones" 'echo "$out" | grep -q -- --strict-mcp-config && python3 -c "import json,sys;d=json.load(open(sys.argv[1]))[\"mcpServers\"];sys.exit(0 if list(d)==[\"s1\"] else 1)" "$f"'
-check "loadout: server credentials go in a 0600 file, never on the command line" '[ "$(stat -c %a "$f")" = "600" ] && ! echo "$out" | grep -q SECRET-TOKEN'
-out=$(lo --dry-run --yes --pick-plugins a@m,b@m --pick-mcp s1)
-f=$(arg_of "$out" --mcp-config)
-check "loadout: strict mode keeps a chosen plugin's own servers, root resolved" 'python3 -c "import json,sys;d=json.load(open(sys.argv[1]))[\"mcpServers\"];sys.exit(0 if d.get(\"bsrv\",{}).get(\"command\")==sys.argv[2]+\"/pb/run.sh\" else 1)" "$f" "$LH"'
-# Jev may ADD a plugin a task clearly needs and pre-pick the model; it never removes one.
-out=$(lo --dry-run --yes --task "debug the blank page in the browser [model=pick:fable] [p0=yes]")
-check "loadout: Jev pre-picks the model and turns on a plugin the task needs" '[ "$(arg_of "$out" --model)" = "fable" ] && arg_of "$out" --settings | grep -q "\"b@m\": true"'
-check "loadout: Jev never turns off a plugin that is normally on" 'arg_of "$out" --settings | grep -q "\"a@m\": true"'
-out=$(TYPESAFE_API_KEY= lo --dry-run --yes --task "debug the blank page [model=pick:fable] [p0=yes]")
-check "loadout: no key, no pre-selection - defaults stand" '[ "$(argc "$out")" = "1" ]'
-rm -rf "$LH"
 
 
-# --- per-hook switches (JEV_HOOKS_DISABLE) and the opt-in interview
+# --- per-hook switches (JEV_HOOKS_DISABLE)
 # The screen lists jev.HOOKS; every name there must be honoured by a hook, or
 # unticking it would do nothing.
 unsynced=$(python3 -c "
@@ -1057,25 +1020,13 @@ check "switch: a switched-off hook is silent and never calls the judge" '[ -z "$
 o1=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"rm -rf build/* # [irreversible=yes]"}}' | JEV_HOOKS_DISABLE=prompt_routing python3 hooks/bash_risk_gate.py)
 check "switch: switching one hook off leaves the others running" 'echo "$o1" | grep -q "\"permissionDecision\": \"ask\""'
 
-si() { python3 -c "import sys,importlib.util,json;import importlib.machinery as im;m=im.SourceFileLoader('l','bin/claude-loadout').load_module();print(m.should_interview(json.loads(sys.argv[1]),sys.argv[2]=='1',tty=True))" "$1" "$2"; }
-check "loadout: off by default - a plain claude at a terminal is never interviewed" '[ "$(si "[]" 0)" = "False" ]'
-check "loadout: --loadout turns the interview on" '[ "$(si "[]" 1)" = "True" ] && [ "$(si "[\"fix it\"]" 1)" = "True" ]'
-check "loadout: --loadout with -p or --resume still passes through" '[ "$(si "[\"-p\",\"hi\"]" 1)" = "False" ] && [ "$(si "[\"--resume\"]" 1)" = "False" ]'
-
-# Rows sized to the terminal: the old fixed 78-column box overflowed on a
-# 43-character plugin id plus a 52-character description.
-fits=$(COLUMNS=80 LINES=30 python3 -c "
-import importlib.util; import importlib.machinery as im;m=im.SourceFileLoader('l','bin/claude-loadout').load_module()
-items=[('chrome-devtools-mcp@claude-plugins-official','Reliable automation, in-depth debugging, and performance analysis in Chrome using Chrome DevTools and Puppeteer')]*3
-w,r,cut=m.layout(items)
-print(w<=76 and all(len(t)+len(d)+14<=w for t,d in cut))")
-check "loadout: every row fits an 80-column terminal, long ids and all" '[ "$fits" = "True" ]'
-EH=$(mktemp -d)
-out=$(cd "$EH" && CLAUDE_LOADOUT_HOME="$EH" python3 "$OLDPWD/bin/claude-loadout" --dry-run --yes --pick-plugins jev-hooks@jev-hooks --pick-hooks bash_gate,edit_gate)
-check "loadout: unticked hooks reach the session as JEV_HOOKS_DISABLE" 'echo "$out" | grep -q "\"env\", \"JEV_HOOKS_DISABLE=narrow,model_router,loop_detect,stop_check,subagent_verify,triage,prompt_routing\""'
-out=$(cd "$EH" && CLAUDE_LOADOUT_HOME="$EH" python3 "$OLDPWD/bin/claude-loadout" --dry-run --yes --pick-plugins "" --pick-hooks bash_gate)
-check "loadout: no jev-hooks in the session, no hook switches" '! echo "$out" | grep -q JEV_HOOKS_DISABLE'
-rm -rf "$EH"
+# The loadout launcher is a Go binary (loadout/). Its own tests cover
+# discovery, the argv and env it builds, the 0600 MCP file, Jev pre-selection
+# and passthrough; they run here when a Go toolchain is present.
+if command -v go >/dev/null 2>&1; then
+  gt=$(cd loadout && go test ./... 2>&1)
+  check "loadout: the Go launcher's tests pass" 'echo "$gt" | grep -q "^ok"'
+fi
 
 # The README states this number, and a number in prose drifts silently: it said
 # 111 while the suite ran 126, and the count of your own tests is the first

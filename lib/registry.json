@@ -1,0 +1,20 @@
+{
+  "_comment": "One source for the hook list and what each model is for. Read by lib/jev.py and lib/models.py, and at runtime by the claude-loadout binary from the installed plugin.",
+  "hooks": {
+    "bash_gate": "asks before risky or outward shell commands",
+    "edit_gate": "asks before a write git cannot undo",
+    "narrow": "trims bulky output before it enters context",
+    "model_router": "picks the model each subagent runs on",
+    "loop_detect": "notices a tool call going nowhere",
+    "stop_check": "stops unverified claims and empty promises",
+    "subagent_verify": "checks a subagent's report against its work",
+    "triage": "keeps decisions across compaction",
+    "prompt_routing": "question/approval hints and model advice"
+  },
+  "criteria": {
+    "opus": "implementation and debugging in a real repository: write or change code, make a failing test pass, work through a multi-step change where a wrong step is expensive to unwind",
+    "fable": "planning, design and judgment about a system: compare approaches, weigh tradeoffs, review a decision, write a spec, a plan or prose explaining how something should work",
+    "sonnet": "mechanical work on this machine: gather context, search a codebase, summarise what exists, run known commands, edit config, follow a procedure that is already decided",
+    "haiku": "a small lookup or transformation where a mistake is obvious and cheap: find a file, list values, extract a field, reformat something short"
+  }
+}
