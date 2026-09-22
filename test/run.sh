@@ -757,6 +757,22 @@ out=$(TYPESAFE_BASE_URL=http://127.0.0.1:1 mr "$(agent 'Find the file. [model=pi
 check "router: judge unreachable fails open" '[ -z "$out" ]'
 out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"ls"}}' | python3 hooks/model_router.py)
 check "router: another tool is not an Agent spawn" '[ -z "$out" ]'
+# A fork runs on its parent's model whatever its input says (observed: rewritten
+# to haiku, ran on opus, meta.json said "inherit"). Routing one only made the log
+# record a route that never happened.
+before=$(wc -l < "$JEV_STUB_RECORD")
+out=$(mr "$(agent 'Find the file. [model=pick:haiku]' '{"subagent_type":"fork"}')")
+check "router: a fork is never routed - its model cannot be changed" '[ -z "$out" ] && [ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
+out=$(JEV_HOOKS_ROUTER_FORCE=1 JEV_HOOKS_ROUTER_TYPES=fork,general-purpose mr "$(agent 'Find the file. [model=pick:haiku]' '{"subagent_type":"fork"}')")
+check "router: not even FORCE or an explicit type list routes a fork" '[ -z "$out" ]'
+# A typed agent can define its own model, and a route beats the definition:
+# claude-code-guide runs on haiku by definition and was routed UP to sonnet.
+out=$(mr "$(agent 'How do SubagentStop hooks receive stdin? [model=pick:sonnet]' '{"subagent_type":"claude-code-guide"}')")
+check "router: a typed agent keeps the model its definition gives it" '[ -z "$out" ]'
+out=$(JEV_HOOKS_ROUTER_TYPES=general-purpose,Explore mr "$(agent 'Find the file. [model=pick:haiku]' '{"subagent_type":"Explore"}')")
+check "router: a type named in JEV_HOOKS_ROUTER_TYPES is routed" 'echo "$out" | grep -q "\"model\": \"haiku\""'
+out=$(printf '%s' '{"tool_name":"Agent","tool_input":{"prompt":"Find the file. [model=pick:haiku]","description":"d"}}' | python3 hooks/model_router.py)
+check "router: an unset subagent_type is general-purpose, and is routed" 'echo "$out" | grep -q "\"model\": \"haiku\""'
 before=$(wc -l < "$JEV_STUB_RECORD")
 out=$(mr '{"tool_name":"Agent","tool_input":{"description":"d"}}')
 check "router: a spawn with no task never reaches the judge" '[ -z "$out" ] && [ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
