@@ -1040,6 +1040,43 @@ out=$(TYPESAFE_API_KEY= lo --dry-run --yes --task "debug the blank page [model=p
 check "loadout: no key, no pre-selection - defaults stand" '[ "$(argc "$out")" = "1" ]'
 rm -rf "$LH"
 
+
+# --- per-hook switches (JEV_HOOKS_DISABLE) and the opt-in interview
+# The screen lists jev.HOOKS; every name there must be honoured by a hook, or
+# unticking it would do nothing.
+unsynced=$(python3 -c "
+import sys,glob; sys.path.insert(0,'lib'); import jev
+src=' '.join(open(f).read() for f in glob.glob('hooks/*.py'))
+print(' '.join(h for h in jev.HOOKS if 'jev.disabled(\"%s\")' % h not in src))")
+check "switch: every hook on the loadout screen honours its own switch" '[ -z "$unsynced" ] || { echo "   ignored: $unsynced"; false; }'
+before=$(wc -l < "$JEV_STUB_RECORD")
+o1=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"rm -rf build/* # [irreversible=yes]"}}' | JEV_HOOKS_DISABLE=bash_gate python3 hooks/bash_risk_gate.py)
+o2=$(printf '%s' '{"prompt":"How does the router pick a model? [kind=pick:question]","session_id":"sw","cwd":"/tmp/nowhere"}' | JEV_HOOKS_DISABLE=narrow,prompt_routing python3 hooks/prompt_routing.py)
+o3=$(printf '%s' '{"tool_name":"Agent","tool_input":{"prompt":"Find the file. [model=pick:haiku]"}}' | JEV_HOOKS_DISABLE=" model_router " python3 hooks/model_router.py)
+check "switch: a switched-off hook is silent and never calls the judge" '[ -z "$o1$o2$o3" ] && [ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
+o1=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"rm -rf build/* # [irreversible=yes]"}}' | JEV_HOOKS_DISABLE=prompt_routing python3 hooks/bash_risk_gate.py)
+check "switch: switching one hook off leaves the others running" 'echo "$o1" | grep -q "\"permissionDecision\": \"ask\""'
+
+si() { python3 -c "import sys,importlib.util,json;import importlib.machinery as im;m=im.SourceFileLoader('l','bin/claude-loadout').load_module();print(m.should_interview(json.loads(sys.argv[1]),sys.argv[2]=='1',tty=True))" "$1" "$2"; }
+check "loadout: off by default - a plain claude at a terminal is never interviewed" '[ "$(si "[]" 0)" = "False" ]'
+check "loadout: --loadout turns the interview on" '[ "$(si "[]" 1)" = "True" ] && [ "$(si "[\"fix it\"]" 1)" = "True" ]'
+check "loadout: --loadout with -p or --resume still passes through" '[ "$(si "[\"-p\",\"hi\"]" 1)" = "False" ] && [ "$(si "[\"--resume\"]" 1)" = "False" ]'
+
+# Rows sized to the terminal: the old fixed 78-column box overflowed on a
+# 43-character plugin id plus a 52-character description.
+fits=$(COLUMNS=80 LINES=30 python3 -c "
+import importlib.util; import importlib.machinery as im;m=im.SourceFileLoader('l','bin/claude-loadout').load_module()
+items=[('chrome-devtools-mcp@claude-plugins-official','Reliable automation, in-depth debugging, and performance analysis in Chrome using Chrome DevTools and Puppeteer')]*3
+w,r,cut=m.layout(items)
+print(w<=76 and all(len(t)+len(d)+14<=w for t,d in cut))")
+check "loadout: every row fits an 80-column terminal, long ids and all" '[ "$fits" = "True" ]'
+EH=$(mktemp -d)
+out=$(cd "$EH" && CLAUDE_LOADOUT_HOME="$EH" python3 "$OLDPWD/bin/claude-loadout" --dry-run --yes --pick-plugins jev-hooks@jev-hooks --pick-hooks bash_gate,edit_gate)
+check "loadout: unticked hooks reach the session as JEV_HOOKS_DISABLE" 'echo "$out" | grep -q "\"env\", \"JEV_HOOKS_DISABLE=narrow,model_router,loop_detect,stop_check,subagent_verify,triage,prompt_routing\""'
+out=$(cd "$EH" && CLAUDE_LOADOUT_HOME="$EH" python3 "$OLDPWD/bin/claude-loadout" --dry-run --yes --pick-plugins "" --pick-hooks bash_gate)
+check "loadout: no jev-hooks in the session, no hook switches" '! echo "$out" | grep -q JEV_HOOKS_DISABLE'
+rm -rf "$EH"
+
 # The README states this number, and a number in prose drifts silently: it said
 # 111 while the suite ran 126, and the count of your own tests is the first
 # claim a reader checks. So the suite asserts its own README rather than

@@ -70,6 +70,8 @@ def criteria_from(prompt):
 
 
 def main():
+    if jev.disabled("subagent_verify"):
+        return                       # switched off for this session (JEV_HOOKS_DISABLE)
     inp = jev.read_stdin()
     if inp.get("stop_hook_active"):
         return

@@ -210,6 +210,8 @@ def file_lines(path):
 
 
 def main():
+    if jev.disabled("narrow"):
+        return                       # switched off for this session (JEV_HOOKS_DISABLE)
     if os.environ.get("JEV_HOOKS_NARROW") == "off":
         debug("off")
         return

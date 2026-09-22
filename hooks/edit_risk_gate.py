@@ -99,6 +99,8 @@ def change(tool, ti):
 
 
 def main():
+    if jev.disabled("edit_gate"):
+        return                       # switched off for this session (JEV_HOOKS_DISABLE)
     inp = jev.read_stdin()
     tool = inp.get("tool_name")
     if tool not in TOOLS:

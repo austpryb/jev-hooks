@@ -11,6 +11,7 @@ sid = jev.safe_id(inp.get("session_id"))
 d = os.environ.get("CLAUDE_PLUGIN_DATA") or os.path.expanduser("~/.claude/jev-hooks")
 p = os.path.join(d, "keep", f"{sid}.md")
 try:
-    sys.stdout.write(open(p).read())
+    if not jev.disabled("triage"):          # one switch for both halves of compaction triage
+        sys.stdout.write(open(p).read())
 except Exception:
     pass

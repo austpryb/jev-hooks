@@ -64,6 +64,8 @@ def debug(msg):
 
 
 def main():
+    if jev.disabled("model_router"):
+        return                       # switched off for this session (JEV_HOOKS_DISABLE)
     if os.environ.get("JEV_HOOKS_ROUTER", "").lower() in ("off", "0", "false"):
         return
     inp = jev.read_stdin()

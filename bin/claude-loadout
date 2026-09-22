@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pick this session's plugins, MCP servers and model, then start Claude Code.
 
-    claude-loadout [claude args...]
+    claude-loadout --loadout [claude args...]
 
 Plugins load at startup and no hook can change them once a session runs, so
 the choice has to be made BEFORE `claude` starts. This asks, then execs the
@@ -23,13 +23,19 @@ tick a plugin that is normally off when the task clearly needs it. It never
 unticks anything: a safety hook should not vanish because a task description
 did not mention it.
 
-Only a bare, interactive launch is interviewed. Subcommands, -p/--print,
---resume/--continue, --help/--version, a non-terminal, or CLAUDE_NO_INTERVIEW=1
-pass straight through. Cancelling any screen starts Claude with your normal
-defaults - this never stands between you and a session.
+Off by default: only `claude-loadout --loadout` asks (the --loadout flag is
+consumed, never passed to claude). Without it, or with a subcommand, -p,
+--resume/--continue, --help/--version or no terminal, claude starts exactly as
+it would have. Cancelling any screen starts Claude with your normal defaults -
+this never stands between you and a session.
+
+jev-hooks is one plugin to Claude Code, but its hooks can be switched off one
+by one: when it is ticked, a further screen lists each hook, and the unticked
+ones reach the session as JEV_HOOKS_DISABLE, which every hook honours.
 
 Scripting and tests (no UI):
-    claude-loadout --dry-run --yes [--task T] [--pick-plugins a,b] [--pick-mcp x,y] [--pick-model m] [args]
+    claude-loadout --dry-run --yes [--task T] [--pick-plugins a,b] [--pick-hooks h1,h2]
+                   [--pick-mcp x,y] [--pick-model m] [args]
 prints the argv it would exec, as JSON.
 """
 import json, os, shutil, subprocess, sys, tempfile, time
@@ -48,6 +54,7 @@ PASSTHROUGH_FLAGS = {"-p", "--print", "-r", "--resume", "-c", "--continue", "-h"
                      "--input-format", "--from-pr", "--teleport"}
 MODEL_CHOICES = ["opus", "opus[1m]", "fable", "sonnet", "haiku"]
 CONNECTORS = "claude.ai connectors"
+JEV_HOOKS_ID = "jev-hooks@jev-hooks"
 
 
 def load(path, default=None):
@@ -58,8 +65,10 @@ def load(path, default=None):
         return default
 
 
-def should_interview(argv, env=os.environ, tty=None):
-    if env.get("CLAUDE_NO_INTERVIEW") == "1":
+def should_interview(argv, asked, tty=None):
+    """Only when asked for with --loadout, and only at a terminal. Off by
+    default: a plain `claude` is never interviewed and never slowed."""
+    if not asked:
         return False
     if tty is None:
         tty = sys.stdin.isatty() and sys.stdout.isatty()
@@ -196,54 +205,99 @@ def whiptail(args):
     return None if r.returncode != 0 else r.stderr.strip()
 
 
+def fit(s, n):
+    s = " ".join((s or "").split())
+    return s if len(s) <= n else s[:max(n - 3, 1)] + "..."    # ASCII: renders in any locale
+
+
+def layout(items):
+    """Box sizes from the REAL terminal, and each description cut to what fits
+    beside its tag. A fixed 78-column box with 52-char descriptions overflowed:
+    a tag like chrome-devtools-mcp@claude-plugins-official is 43 chars alone."""
+    cols, lines = shutil.get_terminal_size((80, 24))
+    width = max(50, min(cols - 4, 110))
+    tagw = max([len(t) for t, _ in items] + [4])
+    room = max(width - tagw - 14, 8)                 # checkbox, gaps and borders
+    rows = max(3, min(len(items), lines - 12))
+    return width, rows, [(t, fit(d, room) or "-") for t, d in items]
+
+
+def checklist(text, items, on):
+    """items: [(tag, description)]; on: tags ticked. Returns ticked tags, or None."""
+    width, rows, cut = layout(items)
+    args = ["--separate-output", "--checklist", text, str(rows + 9), str(width), str(rows)]
+    for t, d in cut:
+        args += [t, d, "ON" if t in on else "OFF"]
+    got = whiptail(args)
+    return None if got is None else [x for x in got.split("\n") if x]
+
+
+def radiolist(text, items, pick):
+    width, rows, cut = layout(items)
+    args = ["--radiolist", text, str(rows + 8), str(width), str(rows)]
+    for t, d in cut:
+        args += [t, d, "ON" if t == pick else "OFF"]
+    return whiptail(args)
+
+
 def interview(cwd, plugin_list, servers):
-    task = whiptail(["--inputbox", "What are you working on? (optional - Enter to skip)", "9", "74", ""])
+    cols = shutil.get_terminal_size((80, 24)).columns
+    task = whiptail(["--inputbox", "What are you working on? (optional - Enter to skip)", "9",
+                     str(max(50, min(cols - 4, 110))), ""])
     if task is None:
         return None
     pick, add = preselect(task, plugin_list)
-    rows = []
-    for pid, desc, on in plugin_list:
-        tag = "  (Jev: this task needs it)" if pid in add else ""
-        rows += [pid, (desc[:52] + tag) or "-", "ON" if (on or pid in add) else "OFF"]
-    got = whiptail(["--separate-output", "--checklist", "Plugins for this session (space toggles)", "20", "78", "10"] + rows)
+    # Short tags: the name before @marketplace, unless two plugins share one.
+    names = [pid.split("@")[0] for pid, _, _ in plugin_list]
+    tag_of = {pid: (n if names.count(n) == 1 else pid) for (pid, _, _), n in zip(plugin_list, names)}
+    id_of = {t: pid for pid, t in tag_of.items()}
+    items = [(tag_of[pid], ("[Jev: task needs it] " if pid in add else "") + desc) for pid, desc, _ in plugin_list]
+    got = checklist("Plugins for this session (space toggles, Enter confirms)", items,
+                    {tag_of[pid] for pid, _, on in plugin_list if on or pid in add})
     if got is None:
         return None
-    chosen_plugins = got.split("\n") if got else []
-    rows = [CONNECTORS, "Gmail, Drive, Calendar, Docs, ... (your claude.ai account)", "ON"]
-    for name, c in sorted(servers.items()):
-        rows += [name, (c.get("url") or c.get("command") or c.get("type") or "-")[:52] or "-", "ON"]
-    got = whiptail(["--separate-output", "--checklist",
-                    "MCP servers. Turning ANY of these off starts strict mode, which also drops the "
-                    "claude.ai connectors for this session.", "20", "78", "10"] + rows)
+    chosen_plugins = [id_of[t] for t in got if t in id_of]
+    disabled_hooks = []
+    if JEV_HOOKS_ID in chosen_plugins:
+        try:
+            import jev
+            hooks = jev.HOOKS
+        except Exception:
+            hooks = {}
+        if hooks:
+            got = checklist("jev-hooks: which hooks run this session", list(hooks.items()), set(hooks))
+            if got is None:
+                return None
+            disabled_hooks = [h for h in hooks if h not in got]
+    items = [(CONNECTORS, "Gmail, Drive, Calendar, Docs... (your claude.ai account)")]
+    items += [(n, c.get("url") or c.get("command") or c.get("type") or "-") for n, c in sorted(servers.items())]
+    got = checklist("MCP servers. Turning ANY off starts strict mode, which also drops the claude.ai "
+                    "connectors for this session.", items, {t for t, _ in items})
     if got is None:
         return None
-    picked = got.split("\n") if got else []
-    chosen_mcp = [n for n in picked if n != CONNECTORS]
-    keep_connectors = CONNECTORS in picked and set(chosen_mcp) == set(servers)
+    chosen_mcp = [n for n in got if n != CONNECTORS]
+    keep_connectors = CONNECTORS in got and set(chosen_mcp) == set(servers)
     base = default_model()
-    pre = pick or base
-    rows = [base if base != "default" else "default", "your settings default", "ON" if pre == base else "OFF"]
     try:
         import models
         blurb = {m: models.CRITERIA[m.split("[")[0]].split(":")[0] for m in MODEL_CHOICES}
     except Exception:
         blurb = {m: "" for m in MODEL_CHOICES}
-    for m in MODEL_CHOICES:
-        if m != base:
-            rows += [m, (blurb[m][:48] + ("  (Jev)" if m == pick else "")), "ON" if m == pre else "OFF"]
-    model = whiptail(["--radiolist", "Model for this session", "16", "78", "6"] + rows)
+    items = [(base, "your settings default")] + [(m, ("[Jev] " if m == pick else "") + blurb[m])
+                                                  for m in MODEL_CHOICES if m != base]
+    model = radiolist("Model for this session", items, pick or base)
     if model is None:
         return None
-    return chosen_plugins, chosen_mcp, keep_connectors, model
+    return chosen_plugins, disabled_hooks, chosen_mcp, keep_connectors, model
 
 
 def main(argv):
     own, rest, i = {}, [], 0
     while i < len(argv):
         a = argv[i]
-        if a in ("--dry-run", "--yes"):
+        if a in ("--dry-run", "--yes", "--loadout"):
             own[a] = True
-        elif a in ("--task", "--pick-plugins", "--pick-mcp", "--pick-model") and i + 1 < len(argv):
+        elif a in ("--task", "--pick-plugins", "--pick-hooks", "--pick-mcp", "--pick-model") and i + 1 < len(argv):
             own[a] = argv[i + 1]; i += 1
         else:
             rest.append(a)
@@ -251,32 +305,45 @@ def main(argv):
     real = shutil.which("claude") or "claude"
     cwd = os.getcwd()
     scripted = own.get("--yes")
-    if not scripted and not should_interview(rest):
+    if not scripted and not should_interview(rest, own.get("--loadout")):
         return launch([real] + rest, own)
     plugin_list, servers = plugins(cwd), mcp_servers(cwd)
     if scripted:
         pick, add = preselect(own.get("--task", ""), plugin_list)
         chosen_plugins = own["--pick-plugins"].split(",") if "--pick-plugins" in own else \
             [pid for pid, _, on in plugin_list if on or pid in add]
+        try:
+            import jev
+            hooks = list(jev.HOOKS)
+        except Exception:
+            hooks = []
+        kept = [h for h in own.get("--pick-hooks", ",".join(hooks)).split(",") if h]
+        disabled_hooks = [h for h in hooks if h not in kept] if JEV_HOOKS_ID in chosen_plugins else []
         chosen_mcp = [n for n in own["--pick-mcp"].split(",") if n] if "--pick-mcp" in own else list(servers)
         keep_connectors = "--pick-mcp" not in own
         model = own.get("--pick-model") or pick or default_model()
     else:
         if not shutil.which("whiptail"):
+            sys.stderr.write("claude-loadout: whiptail not found; starting claude as usual\n")
             return launch([real] + rest, own)
         got = interview(cwd, plugin_list, servers)
         if got is None:                                   # cancelled: normal defaults, no flags
             return launch([real] + rest, own)
-        chosen_plugins, chosen_mcp, keep_connectors, model = got
+        chosen_plugins, disabled_hooks, chosen_mcp, keep_connectors, model = got
     if model == default_model():
         model = "default"
     runtime = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or os.path.join(HOME, ".cache"), "claude-loadout")
     argv2 = build_argv(rest, plugin_list, chosen_plugins, servers, chosen_mcp, keep_connectors, model, runtime)
     argv2[0] = real
+    if disabled_hooks:
+        # Hooks inherit claude's environment (verified), and each honours
+        # JEV_HOOKS_DISABLE. `env` makes the command printed the command run.
+        argv2 = ["env", "JEV_HOOKS_DISABLE=" + ",".join(disabled_hooks)] + argv2
     if not own.get("--dry-run"):
         mcp_note = "all" if "--strict-mcp-config" not in argv2 else (", ".join(chosen_mcp) or "none") + " (strict)"
+        hooks_note = f" · hooks off: {', '.join(disabled_hooks)}" if disabled_hooks else ""
         sys.stderr.write(f"loadout: model {model} · plugins {', '.join(p.split('@')[0] for p in chosen_plugins) or 'none'}"
-                         f" · mcp {mcp_note}\n")
+                         f"{hooks_note} · mcp {mcp_note}\n")
     return launch(argv2, own)
 
 

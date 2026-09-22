@@ -68,6 +68,8 @@ def judge(batch):
 
 
 def main():
+    if jev.disabled("triage"):
+        return                       # switched off for this session (JEV_HOOKS_DISABLE)
     inp = jev.read_stdin()
     path = inp.get("transcript_path"); sid = jev.safe_id(inp.get("session_id"))
     # Every compaction yields a fresh keep-set or none, never a stale one. The

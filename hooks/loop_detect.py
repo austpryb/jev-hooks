@@ -103,6 +103,8 @@ def looks_like_error(resp, text):
 
 
 def main():
+    if jev.disabled("loop_detect"):
+        return                       # switched off for this session (JEV_HOOKS_DISABLE)
     inp = jev.read_stdin()
     sid = inp.get("session_id") or "unknown"
     tool = inp.get("tool_name") or ""

@@ -92,6 +92,8 @@ def sentence_for(check, message):
 
 
 def main():
+    if jev.disabled("stop_check"):
+        return                       # switched off for this session (JEV_HOOKS_DISABLE)
     inp = jev.read_stdin()
     if inp.get("stop_hook_active"):
         return
