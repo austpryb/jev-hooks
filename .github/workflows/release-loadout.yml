@@ -1,0 +1,70 @@
+name: Release claude-loadout
+
+# Build the loadout binary for every platform the team uses and attach it to a
+# GitHub release, so a new developer installs it with one command instead of
+# needing a Go toolchain. Tag a release to publish:
+#
+#   git tag v0.21.0 && git push origin v0.21.0
+#
+# The repo is private, so downloads use each developer's own gh credentials.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and attach to (must already exist)'
+        required: true
+
+permissions:
+  contents: write # create the release and upload the binaries
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: loadout/go.sum
+      # The tests are the same ones test/run.sh runs; a release that cannot
+      # pass them should not exist.
+      - name: Test
+        working-directory: loadout
+        run: go test ./...
+      - name: Build
+        working-directory: loadout
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os=${target%/*}; arch=${target#*/}
+            echo "building $os/$arch"
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
+              -ldflags "-s -w -X main.version=${{ github.event.inputs.tag || github.ref_name }}" \
+              -o "dist/claude-loadout-$os-$arch" .
+          done
+          (cd dist && sha256sum claude-loadout-* > SHA256SUMS)
+          ls -l dist
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            loadout/dist/claude-loadout-*
+            loadout/dist/SHA256SUMS
+          body: |
+            `claude-loadout` — pick a session's plugins, hooks, MCP servers and model, and run the kit setup.
+
+            Install (private repo, uses your own gh credentials):
+
+            ```sh
+            gh release download ${{ github.event.inputs.tag || github.ref_name }} -R instruxi-io/jev-hooks \
+              --pattern "claude-loadout-$(uname -s | tr 'A-Z' 'a-z')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" \
+              --output ~/.local/bin/claude-loadout --clobber
+            chmod +x ~/.local/bin/claude-loadout
+            claude-loadout setup
+            ```
