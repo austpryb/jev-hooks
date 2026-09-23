@@ -78,7 +78,11 @@ func runSetup(args []string) int {
 		}
 	}
 	secrets := map[string]string{}
-	shell := ShellInstalled(rc)
+	// --yes takes the defaults, and the default is to want the shell function;
+	// otherwise a non-interactive setup silently skipped the one step that
+	// makes `claude --loadout` work.
+	wantShell := !ShellInstalled(rc) || yes // --yes takes the defaults, and the
+	shell := wantShell                      // default is to want the function
 
 	if !yes && !dry {
 		var err error
@@ -89,7 +93,10 @@ func runSetup(args []string) int {
 		}
 	}
 
-	plan := Plan(e, kit, repo, wantPlugins, wantMCP, secrets, shell || ShellInstalled(rc))
+	// Done comes from the file, never from what was asked for: conflating the
+	// two made a --yes run report "everything is already in place" and install
+	// nothing.
+	plan := Plan(e, kit, repo, wantPlugins, wantMCP, secrets, ShellInstalled(rc))
 	if dry {
 		b, _ := json.MarshalIndent(plan, "", "  ")
 		fmt.Println(string(b))
