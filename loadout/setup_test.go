@@ -158,3 +158,19 @@ func TestShellConflictWithAHandRolledFunction(t *testing.T) {
 		t.Error("once the marked block is in place, it is not a conflict")
 	}
 }
+
+func TestYesModeStillWantsTheShellFunction(t *testing.T) {
+	// The shell step is the one thing --yes used to skip: `shell` started as
+	// "is it already installed", which is false exactly when it must be done.
+	e, kit := kitFixture(t)
+	plan := Plan(e, kit, "o/x", nil, nil, map[string]string{}, false)
+	var shell *Action
+	for i := range plan {
+		if plan[i].Kind == "shell" {
+			shell = &plan[i]
+		}
+	}
+	if shell == nil || shell.Done {
+		t.Fatalf("a shell step must be pending when it is not installed: %+v", shell)
+	}
+}
