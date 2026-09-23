@@ -1,7 +1,9 @@
 // claude-loadout picks a session's plugins, jev-hooks hooks, MCP servers and
 // model, then starts Claude Code with them.
 //
-//	claude-loadout [claude args...]
+//	claude-loadout [claude args...]      pick this session's loadout
+//	claude-loadout setup                 install the kit: marketplace, plugins,
+//	                                     your own keys, MCP servers, shell function
 //
 // Plugins load at startup and no hook can change them in a running session, so
 // the choice is made before `claude` starts:
@@ -35,11 +37,21 @@ import (
 	"golang.org/x/term"
 )
 
+// version is stamped by the release workflow (-X main.version=<tag>).
+var version = "dev"
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
 func run(args []string) int {
+	if len(args) > 0 && args[0] == "setup" {
+		return runSetup(args[1:])
+	}
+	if len(args) == 1 && (args[0] == "version" || args[0] == "--loadout-version") {
+		fmt.Println("claude-loadout", version)
+		return 0
+	}
 	own := map[string]string{}
 	var rest []string
 	for i := 0; i < len(args); i++ {

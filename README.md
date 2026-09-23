@@ -380,20 +380,32 @@ and by the binary.
 A subcommand, `-p`, `--resume`/`--continue` or a non-terminal runs `claude`
 exactly as asked.
 
-Build it once, then add the shell function:
+### First-time setup on a new machine: `claude-loadout setup`
+
+`setup` installs the whole kit — the marketplace, the plugins, the keys only
+you can supply, the MCP servers no plugin can carry, and the shell function —
+and is safe to re-run: whatever is already in place is shown as done and
+skipped, so a second run only fills gaps. That is also how someone picks up a
+change to the kit.
 
 ```sh
-cd loadout && go build -o ~/.local/bin/claude-loadout .
+# the binary, from the latest release (private repo: uses your own gh credentials)
+gh release download -R instruxi-io/jev-hooks \
+  --pattern "claude-loadout-$(uname -s | tr 'A-Z' 'a-z')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" \
+  --output ~/.local/bin/claude-loadout --clobber && chmod +x ~/.local/bin/claude-loadout
+
+claude-loadout setup
 ```
 
-```sh
-claude() {
-  local a want= args=()
-  for a in "$@"; do if [ "$a" = --loadout ]; then want=1; else args+=("$a"); fi; done
-  if [ -n "$want" ] && command -v claude-loadout >/dev/null; then claude-loadout "${args[@]}"; return; fi
-  command claude "${args[@]}"
-}
-```
+It adds the marketplace, reads `kit.json` from the clone Claude Code already
+makes, and asks which plugins and servers you want and for your own keys. Keys
+are written to your `~/.claude/settings.json` (tightened to 0600) and never to
+a repo. `--dry-run` prints the plan and changes nothing; `--kit-repo
+owner/repo` points it at another kit. A `claude` function this block did not
+write is reported rather than appended beside, so two definitions never end up
+in one file.
+
+From a checkout instead: `cd loadout && go build -o ~/.local/bin/claude-loadout .`
 
 ## What the hooks decided, and tuning them with it
 
