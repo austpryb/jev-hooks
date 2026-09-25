@@ -161,6 +161,17 @@ model reads: a label from the party being judged is not a label.
 A plain promise ("I'll open the PR next"), a plan in place of results, and an
 unevidenced past result ("all 41 checks pass") all still block.
 
+A `!` command the user runs is their turn (0.23.0). Those records used to be
+stripped to nothing, so while a user drove a terraform roll with their own `!`
+commands, each short report on a command was judged against the request from
+before they started: 5 blocks in 7 replies. Now the command and its output are
+evidence the judge sees, and `unanswered` cannot block until the user types a
+new request. The judge also sees the replies already sent to the prompt, so a
+follow-up after a task notice is not read as ignoring it, and naming what was
+NOT verified is not read as a claim. Replayed against the live service over
+that session's 9 blocks: the 7 misfires pass (one still blocks about one run in
+four), and the 2 fair catches, an overclaim and a stale status, still block.
+
 ## Narrowing output, live
 
 Tool results dominate a session's context — in one real transcript ~1460 tool results
@@ -477,7 +488,7 @@ their terms before enabling this on a repository whose prompts are sensitive.
 ## Test
 
 ```bash
-bash test/run.sh      # 226 checks against a local stub; no key, no network
+bash test/run.sh      # 233 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),
