@@ -98,8 +98,8 @@ def forget_hint(sid):
 
 
 def repeated(sid, want, current):
-    """True when this session was already told to switch to `want` WHILE ON
-    `current`. Advice repeated every prompt is noise, and the second telling
+    """True when this session was already given a model hint WHILE ON
+    `current` (whatever that hint was). Advice repeated every prompt is noise, and the second telling
     never persuades anyone the first did not. But the state is keyed on the
     model it was given on too: keyed on `want` alone, it never reset - a user
     who took the advice and later moved off it was never told again for the
@@ -114,7 +114,12 @@ def repeated(sid, want, current):
             st = json.load(open(p))
         except Exception:
             st = {}
-        if st.get("last") == want and st.get("on") == current:
+        # ONE hint per model the session is on, not one per change of advice.
+        # Keyed on `last` too, the hint came back every time the advice flipped
+        # between sonnet and fable on the same session model: 69 hints in three
+        # days of logs (2026-09-25), nearly one per mechanical prompt. A new model
+        # (the user switched) starts a new epoch and may be told once again.
+        if st.get("on") == current:
             return True
         json.dump({"last": want, "on": current}, open(p, "w"))
     except Exception:

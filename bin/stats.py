@@ -10,7 +10,7 @@ costs, and — the one that matters for tuning — how many judgments landed in 
 band just either side of a threshold, where a verdict flips on wording rather
 than substance. A decision marked wrong with bin/wrong.py shows as disputed.
 """
-import json, os, sys, collections
+import json, os, sys, collections, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import jev
 
@@ -31,6 +31,8 @@ def main():
     versions = collections.Counter()
     calls = tokens = 0
     secs = []
+    failed = collections.Counter()          # outcome -> count, for calls that did not return ok
+    failed_hours = collections.Counter()    # UTC hour -> failed calls: an outage shows as a block
     for line in open(path):
         try:
             r = json.loads(line)
@@ -45,6 +47,12 @@ def main():
             tokens += (r.get("usage") or {}).get("input_tokens", 0)
             if r.get("secs"):
                 secs.append(r["secs"])
+            if r.get("outcome") not in (None, "ok"):
+                failed[str(r.get("outcome"))] += 1
+                try:
+                    failed_hours[time.strftime("%m-%d %H:00", time.gmtime(float(r["t"])))] += 1
+                except Exception:
+                    pass
         elif r.get("kind") == "decision":
             by_hook[r["hook"]][r["decision"]] += 1
             for k, v in (r.get("probs") or {}).items():
@@ -58,6 +66,14 @@ def main():
     print("decisions by plugin version: " + ", ".join(f"{v} {n}" for v, n in sorted(versions.items())))
     print(f"calls {calls}  input tokens {tokens:,}  cost ${tokens * 0.042 / 1_000_000:.4f}"
           + (f"  median {sorted(secs)[len(secs)//2]:.2f}s" if secs else ""))
+    # Every failed call is a check that did not happen: the hooks fail open, so
+    # nothing else says so. 2026-09-22/23 had three hours where every call was
+    # a 403 and no hook ran; only this line would have shown it.
+    if failed:
+        nf = sum(failed.values())
+        print(f"FAILED calls {nf} ({100 * nf / max(calls, 1):.1f}%): "
+              + ", ".join(f"{k} {n}" for k, n in failed.most_common(4))
+              + "  worst hours (UTC): " + ", ".join(f"{h} {n}" for h, n in failed_hours.most_common(3)))
     print()
     for hook in sorted(by_hook):
         total = sum(by_hook[hook].values())

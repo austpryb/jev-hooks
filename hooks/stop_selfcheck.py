@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import jev, transcript
 
 BLOCK_AT = 0.7
+IN_FLIGHT_BLOCK_AT = float(os.environ.get("JEV_HOOKS_STOP_IN_FLIGHT_AT", "0.9"))
 RESULTS_CHARS = 8_000      # budget for the call+output record; prompt and message are small
 MESSAGE_CHARS = 8_000
 
@@ -146,6 +147,14 @@ def main():
     if not a:
         return
     failed = [(k, a[k]["noul"]) for k in ("promise", "unanswered", "unverified") if a.get(k, {}).get("noul", 0) >= BLOCK_AT]
+    # With work IN FLIGHT, a message that is waiting on it has usually neither
+    # kept its promise nor fully answered yet, legitimately. From the decision log
+    # (2026-09-25): 74 of 199 blocks fired with background work running; promise
+    # and unanswered there had median 0.83, i.e. just over the line. So with work in
+    # flight those two need IN_FLIGHT_BLOCK_AT; unverified is unchanged, because a
+    # claim without evidence is not excused by something else running.
+    if bg:
+        failed = [(k, p) for k, p in failed if k == "unverified" or p >= IN_FLIGHT_BLOCK_AT]
     # The harness says work is in flight AND the message says it is not finished:
     # that is a paused session reporting itself, so `promise` alone cannot block.
     paused = bool(bg) and bool(PAUSED.search(message))

@@ -1,6 +1,6 @@
 """A stand-in for api.typesafe.ai so hooks can be exercised without a key.
 A test steers answers with markers anywhere in the request (usually inside the
-state): [qid=yes] / [qid=no] for a noul (else 0.5), [qid=pick:<option>] for a
+state): [qid=yes] / [qid=no] / [qid=p:0.8] for a noul (else 0.5), [qid=pick:<option>] for a
 choice (else the first option), [qid=level:<n>] for a score (else the middle);
 [stub=429once:<token>] makes the first request carrying that token a 429 with Retry-After: 0.
 JEV_STUB_RECORD=<path> appends every raw request body there, so a test can assert
@@ -16,7 +16,7 @@ def answer(qid, q, body_text):
     m = re.search(r"\[" + re.escape(qid) + r"=([^\]]+)\]", body_text)
     steer = m.group(1) if m else ""
     if t == "noul":
-        v = 1.0 if steer == "yes" else 0.0 if steer == "no" else 0.5
+        v = 1.0 if steer == "yes" else 0.0 if steer == "no" else float(steer[2:]) if steer.startswith("p:") else 0.5
         return {"type": "noul", "noul": v}
     if t == "choice":
         opts = list(q["criteria"])
