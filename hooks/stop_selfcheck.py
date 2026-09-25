@@ -67,13 +67,22 @@ def last_prompt_and_results(path):
     comes from transcript.tool_results so this check and the subagent verifier
     weigh the same evidence: each call paired with its output, not loose
     results that name nothing."""
-    prompt, at = "", -1
+    prompt, at, ran, replies = "", -1, [], []
     for s in transcript.segments(path):
         if s["kind"] == "prompt" and not any(b in s["text"] for b in transcript.BOILERPLATE) \
                 and not transcript.is_harness_prompt(s["text"]) and not transcript._is_summary(s["text"]):
-            prompt, at = s["text"], s["i"]     # a compaction summary is not the user's question
+            prompt, at, ran, replies = s["text"], s["i"], [], []   # a compaction summary is not the user's question
+        elif s["kind"] == "assistant" and at >= 0:
+            # Replies already sent to this prompt. A later turn - after a task
+            # notice or an agent's hand-back - is a follow-up, and judged alone
+            # against the prompt it read as never answering it (2026-09-25).
+            replies.append(s["text"])
+        elif s["kind"] == "shell" and s["text"].startswith("$ "):
+            # The user ran a `!` command after asking: their latest turn is that
+            # command, not a new request, and "this turn" starts there.
+            ran.append(s["text"][2:][:200]); at = s["i"]
     return (prompt, transcript.tool_results(path, chars=RESULTS_CHARS),
-            transcript.tool_results(path, chars=RESULTS_CHARS, after=at))
+            transcript.tool_results(path, chars=RESULTS_CHARS, after=at), ran, replies)
 
 
 def sentence_for(check, message):
@@ -104,7 +113,14 @@ def main():
         message = transcript.last_assistant_text(path)
     if not message:
         return
-    prompt, results, this_turn = last_prompt_and_results(path) if path else ("", [], [])
+    prompt, results, this_turn, ran, replies = last_prompt_and_results(path) if path else ("", [], [], [], [])
+    # The final message is usually the transcript's last reply too; only EARLIER
+    # ones count. Compared on a shared prefix, not equality: the transcript copy
+    # is clipped and the Stop input's copy need not match it byte for byte.
+    if replies:
+        last, head = replies[-1].strip(), message.strip()[:80]
+        if head and last.startswith(head[:len(last)] if len(last) < 80 else head):
+            replies = replies[:-1]
     # "Still running" and "was denied" are facts about THIS turn. Read over the
     # whole session, a background build that finished turns ago set in_flight
     # and excused a fresh, real promise (audit 2026-09-21). An unverified claim
@@ -112,7 +128,9 @@ def main():
     bg = in_flight(inp, this_turn)
     denied = any(DENIED.search(r) for r in this_turn)
     state = {"last_user_prompt": prompt[:4_000], "final_message": message[:MESSAGE_CHARS],
-             "recent_tool_results": results, "in_flight": bg, "permission_denied": denied}
+             "recent_tool_results": results, "in_flight": bg, "permission_denied": denied,
+             "user_ran_commands": ran[-5:],
+             "earlier_replies_to_prompt": [r[:1_500] for r in replies[-3:]]}
     q = {
         "promise": jev.noul(
             "Does `final_message` end with, or hinge on, a promise of work not yet done — something the assistant says it will do next, "
@@ -125,12 +143,19 @@ def main():
                   "where the work stands and not a promise the assistant is free to keep; a STATUS REPORT on work the assistant has ALREADY "
                   "STARTED and cannot finish faster — a background command, a subagent, a scheduled wake-up, a deployment being polled "
                   "(`in_flight` lists what the harness says is still running) — that says plainly what is and is not done yet; a command "
-                  "handed to the user to run themselves because the assistant was refused permission to run it (`permission_denied`)"),
+                  "handed to the user to run themselves because the assistant was refused permission to run it (`permission_denied`); "
+                  "a reply while the USER is running commands themselves (`user_ran_commands` lists the `!` commands they ran since "
+                  "`last_user_prompt`) that reports on what the last one printed and names the next command for THEM to run, or asks "
+                  "them to paste output of a command they will run so it can be reviewed"),
         "unanswered": jev.noul(
             "Did `last_user_prompt` ask a question or request something specific that `final_message` does not answer or deliver? "
             "Ignore this if `last_user_prompt` is empty or is not a request.",
             true="the user asked X and the message talks about Y, or gives a plan instead of the answer",
-            false="the message answers the question or delivers the request, even briefly; an explicit statement that the thing was NOT done or NOT known IS an answer; "
+            false="a question or offer the ASSISTANT puts to the user in `final_message` ('Want me to…?', 'Should I…?') — that is the "
+                  "assistant asking, not the user; judge only whether `last_user_prompt` itself was answered; "
+                  "a FOLLOW-UP after the prompt was already answered by a reply in `earlier_replies_to_prompt` (e.g. a status line once a "
+                  "background task finishes, or a note after a subagent reports) — the prompt was answered there, not left open; "
+                  "the message answers the question or delivers the request, even briefly; an explicit statement that the thing was NOT done or NOT known IS an answer; "
                   "a status answer ('not yet', 'still running', 'no change since the last check') to a status question ('done?', 'check it now') IS an answer; "
                   "or the prompt was just 'keep going' / an acknowledgement / pasted command output"),
         "unverified": jev.noul(
@@ -138,7 +163,8 @@ def main():
             "that `recent_tool_results` do not show? Treat the tool results as the only evidence. If `recent_tool_results` is empty, answer no.",
             true="claims 'tests pass' but no test output is in the results; a count that appears nowhere in the results",
             false="every stated outcome or number is supported by the results (an 'ok' line from a build or test command supports 'build is green'); "
-                  "or the message makes no such claims; or it says the thing was not done; or the outcome is EXPECTED FROM A CHECK NOT YET RUN "
+                  "or the message makes no such claims; or it says the thing was not done, or names what was NOT verified or checked "
+                  "(an admission of a gap is the opposite of a claim); or it tells the user what to run or look for next; or the outcome is EXPECTED FROM A CHECK NOT YET RUN "
                   "— what a pending test will look for, what a roll should show, the value that would confirm a fix — which is a statement of "
                   "intent, not a claim that the check already passed; or the outcome is a DESCRIPTION OF CONTENT THE ASSISTANT ITSELF WROTE "
                   "this turn — the Write or Edit call in `recent_tool_results` quotes what was written and is the evidence for it"),
@@ -155,6 +181,15 @@ def main():
     # claim without evidence is not excused by something else running.
     if bg:
         failed = [(k, p) for k, p in failed if k == "unverified" or p >= IN_FLIGHT_BLOCK_AT]
+    # The user's latest turn was a `!` command they ran, not a request, so there
+    # is nothing for `unanswered` to measure: `last_user_prompt` is the request
+    # from BEFORE they started, which earlier replies already answered. Judged
+    # against it anyway, each short report on a command read as ignoring it
+    # (2026-09-25: 4 of 5 blocks in a user-driven terraform roll). Deterministic,
+    # not a judge instruction. `unverified` still runs - their output is now
+    # evidence - and so does `promise`.
+    if ran:
+        failed = [(k, p) for k, p in failed if k != "unanswered"]
     # The harness says work is in flight AND the message says it is not finished:
     # that is a paused session reporting itself, so `promise` alone cannot block.
     paused = bool(bg) and bool(PAUSED.search(message))
@@ -164,7 +199,7 @@ def main():
     else:
         gated = None
     if not failed:
-        jev.record("stop_check", "pass", a, note=gated, in_flight=len(bg) or None)
+        jev.record("stop_check", "pass", a, note=gated or ("user_shell" if ran else None), in_flight=len(bg) or None)
         return
     names = {"promise": "the message promises work not yet done",
              "unanswered": "the message does not answer what the user last asked",

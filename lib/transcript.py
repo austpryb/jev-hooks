@@ -21,6 +21,30 @@ def prompt_text(txt):
             return ""
     return txt
 
+# A `!` command the USER ran in the session arrives as its own user records:
+# {"content": "<bash-input>cmd</bash-input>"} then "<bash-stdout>..</bash-stdout><bash-stderr>..</bash-stderr>".
+# prompt_text strips those tags to nothing, so they used to vanish: the stop check
+# kept judging each reply against the request BEFORE the user started running
+# commands, and never saw their output as evidence. Measured 2026-09-25: a
+# terraform roll driven by the user's own `!` commands drew 5 blocks in 7 replies,
+# every one a report on the command just run judged against an older prompt.
+_SHELL = re.compile(r"<bash-(input|stdout|stderr)>(.*?)</bash-\1>", re.S)
+_CWD_RESET = re.compile(r"\s*Shell cwd was reset to \S+\s*")
+
+
+def shell_text(txt):
+    """'$ cmd' for a command the user ran with `!`, '-> output' for what it
+    printed, '' for anything else."""
+    parts = dict(_SHELL.findall(txt or ""))
+    if "input" in parts:
+        return "$ " + parts["input"].strip()
+    if "stdout" in parts or "stderr" in parts:
+        out = "\n".join(p for p in (parts.get("stdout", "").strip(),
+                                     _CWD_RESET.sub("\n", parts.get("stderr", "")).strip()) if p)
+        return "-> " + (out or "(no output)")
+    return ""
+
+
 TOOL_RESULT_CHARS = 700   # a result's first lines say what happened; the rest is bulk
 TEXT_CHARS = 2500
 WRITE_TOOLS = ("Write", "Edit", "NotebookEdit", "MultiEdit")
@@ -69,7 +93,8 @@ def _result_text(block):
 
 def segments(path):
     """Yield dicts {i, role, kind, text} in transcript order.
-    kinds: prompt (user typed), assistant (final prose), tool_use (name + input summary), tool_result.
+    kinds: prompt (user typed), assistant (final prose), tool_use (name + input summary), tool_result,
+    shell (a `!` command the user ran: "$ cmd", then its output as "-> ...").
     Fork/subagent boilerplate and system-reminder wrappers are dropped from prompts."""
     i = 0
     try:
@@ -87,6 +112,10 @@ def segments(path):
                 continue
             c = (r.get("message") or {}).get("content")
             if isinstance(c, str):
+                sh = shell_text(c) if t == "user" else ""
+                if sh:
+                    yield {"i": i, "role": "user", "kind": "shell", "text": _clip_ends(sh, TOOL_RESULT_CHARS)}; i += 1
+                    continue
                 txt = prompt_text(c)
                 if txt:
                     yield {"i": i, "role": "user", "kind": "prompt", "text": _clip(txt, TEXT_CHARS)}; i += 1
@@ -102,6 +131,10 @@ def segments(path):
                     if txt:
                         yield {"i": i, "role": "assistant", "kind": "assistant", "text": _clip(txt, TEXT_CHARS)}; i += 1
                 elif bt == "text" and t == "user":
+                    sh = shell_text(b.get("text", ""))
+                    if sh:
+                        yield {"i": i, "role": "user", "kind": "shell", "text": _clip_ends(sh, TOOL_RESULT_CHARS)}; i += 1
+                        continue
                     txt = prompt_text(b.get("text", ""))
                     if txt:
                         yield {"i": i, "role": "user", "kind": "prompt", "text": _clip(txt, TEXT_CHARS)}; i += 1
@@ -466,7 +499,7 @@ def tool_results(path, chars=16_000, result_chars=400, after=-1):
       that will not fit does the window close, with a line saying how many
       earlier calls it left out.
     """
-    pending, entries = {}, []
+    pending, entries, shell_at = {}, [], None
     spawn = parent_spawn_ids(path)       # the parent's call, not this agent's work
     for s in segments(path):
         if s.get("id") in spawn and s["kind"] in ("tool_use", "tool_result"):
@@ -476,6 +509,15 @@ def tool_results(path, chars=16_000, result_chars=400, after=-1):
         if s["kind"] == "tool_use":
             pending[s.get("id")] = len(entries)
             entries.append([s["text"], ""])
+        elif s["kind"] == "shell":
+            # The user's own `!` command is evidence too: its output is what a
+            # reply about it rests on.
+            if s["text"].startswith("$ "):
+                shell_at = len(entries)
+                entries.append([f"User ran (!): {s['text'][2:]}", ""])
+            elif shell_at is not None:
+                entries[shell_at][1] = s["text"][3:]
+                shell_at = None
         elif s["kind"] == "tool_result":
             idx = pending.pop(s.get("id"), None)
             if idx is None:
