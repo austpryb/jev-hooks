@@ -59,10 +59,11 @@ HARMLESS_REDIRECT = re.compile(r"2>&1|&>\s*/dev/null|[12]?>{1,2}\s*/dev/null")
 # apply`): an option, optionally followed by one value.
 _OPTS = r"(?:-\S+(?:\s+[^-\s|;&()]\S*)?\s+)*"
 OUTWARD = re.compile(
-    r"(?:^|[;&|(\n]\s*)"                                   # a segment start, incl. a newline or a subshell
+    r"(?:^|[;&|(\n]\s*|\b(?:do|then|else)\s+)"          # a segment start, incl. a newline, a subshell, or a loop/if body
     r"(?:(?:sudo|time|env|npx|bunx|pnpm\s+dlx)\s+(?:\w+=\S*\s+)*)*"   # wrappers and VAR=val
     r"("
-    r"gh\s+" + _OPTS + r"(?:pr\s+(?:merge|create)|release\s+create)|"
+    r"gh\s+" + _OPTS + r"(?:pr\s+(?:merge|create)|release\s+(?:create|delete)|repo\s+(?:create|delete|edit|rename|archive))|"
+    r"gh\s+api\b[^\n;&|]*\s(?:-X|--method)\s*['\"]?(?:POST|PUT|PATCH|DELETE)\b|"
     r"git\s+" + _OPTS + r"push(?![^\n;&|]*--dry-run)|"
     r"terraform\s+" + _OPTS + r"(?:apply|destroy)|"
     r"helm\s+" + _OPTS + r"(?:install|upgrade|uninstall)|"
@@ -167,6 +168,21 @@ def is_read_only(cmd):
     return all(_segment_read_only(p) for p in split_segments(cmd))
 
 
+# Heredoc BODIES are data, not commands: a commit message or a patch that has a
+# line starting with `git push` is not a push. Found in the decision log: 7 outward
+# prompts matched inside a heredoc. The body is dropped before matching; the
+# line that opens the heredoc still counts.
+_HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n.*?\n\s*\2\s*(?=\n|$)", re.S)
+
+
+def strip_heredocs(cmd):
+    return _HEREDOC.sub(lambda m: m.group(0).split("\n", 1)[0], cmd)
+
+
+def outward_match(cmd):
+    return OUTWARD.search(strip_heredocs(cmd))
+
+
 def main():
     if jev.disabled("bash_gate"):
         return                       # switched off for this session (JEV_HOOKS_DISABLE)
@@ -181,7 +197,7 @@ def main():
         if os.environ.get("JEV_HOOKS_DEBUG"):
             sys.stderr.write("fast-path\n")
         return
-    m = OUTWARD.search(cmd)
+    m = outward_match(cmd)
     if m:
         jev.record("bash_gate", "ask", None, command=cmd[:200], note="outward")
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
@@ -228,7 +244,14 @@ def main():
     # irreversibility — a prompt that fires on a third of all commands teaches
     # the one hand that reads it to approve without reading. So a confirm must
     # now come with confidence AND something actually at stake.
-    elif irr >= 0.5 or (scope == "pattern" and irr >= 0.3) or (act["choice"] == "confirm" and act["confidence"] >= 0.8 and irr >= 0.3):
+    # Raised 2026-09-25 from 0.5 / 0.3 / 0.3, replaying 5782 logged judgments:
+    # 1044 prompts (18%), 553 of them heredoc file edits scoring 0.5-0.7 in git
+    # repos, the coin-flip band; real hazards scored >= 0.8 (kill 0.93, terraform
+    # 0.88, docker run 0.83). The new line prompts on 312 (5.4%) and keeps all 99
+    # of those. What it drops outside heredocs was worktree churn, throwaway test
+    # databases and deleting debug files; the two real outward actions among
+    # them (gh api -X DELETE, `do git push`) are now caught by OUTWARD instead.
+    elif irr >= 0.7 or (scope == "pattern" and irr >= 0.6) or (act["choice"] == "confirm" and act["confidence"] >= 0.8 and irr >= 0.6):
         decision = "ask"; reasons.append(f"irreversible p={irr:.2f}, scope={scope}, verdict={act['choice']}")
     if not decision:
         jev.record("bash_gate", "silent", a, command=cmd[:200])

@@ -95,7 +95,11 @@ def ask(state, questions, retries=1, timeout=None):
         return None
     body = json.dumps({"state": state, "model": MODEL, "questions": questions}).encode()
     req = urllib.request.Request(f"{BASE}/v1/systemone", data=body, method="POST",
-                                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+                                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                                          # Name the client. urllib's default "Python-urllib/3.x" is the
+                                          # signature Cloudflare fronts refuse (403, "error code: 1010"); an
+                                          # API behind one can start doing that any day, and every hook fails open.
+                                          "User-Agent": f"jev-hooks/{VERSION}"})
     t0 = time.time()
     for attempt in range(retries + 1):
         try:

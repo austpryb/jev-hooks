@@ -98,6 +98,35 @@ def change(tool, ti):
     return ti.get("file_path") or "", len(ti.get("old_string") or ""), len(ti.get("new_string") or "")
 
 
+# Files THIS SESSION created. From the decision log (2026-09-25): 60 of 70 edit
+# prompts were "untracked" files, overwhelmingly ones the agent had itself created
+# earlier in the same session (new handlers, new docs) and was now editing again.
+# Untracked only because nothing was committed yet; the previous bytes are the
+# session's own work, in its transcript. Recorded when the new-file fast path
+# lets a Write through, and checked before asking about an untracked file.
+def _created_file(session):
+    d = os.environ.get("CLAUDE_PLUGIN_DATA") or os.path.expanduser("~/.claude/jev-hooks")
+    return os.path.join(d, "created", jev.safe_id(session or "unknown") + ".txt")
+
+
+def remember_created(session, path):
+    try:
+        f = _created_file(session)
+        os.makedirs(os.path.dirname(f), exist_ok=True)
+        with open(f, "a") as fh:
+            fh.write(path + "\n")
+    except Exception:
+        pass
+
+
+def created_this_session(session, path):
+    try:
+        with open(_created_file(session)) as fh:
+            return path in {l.rstrip("\n") for l in fh}
+    except Exception:
+        return False
+
+
 def main():
     if jev.disabled("edit_gate"):
         return                       # switched off for this session (JEV_HOOKS_DISABLE)
@@ -114,9 +143,13 @@ def main():
     ap = os.path.realpath(path)
     if ap.startswith(SCRATCH) or "/scratchpad/" in ap:
         debug("fast-path: scratch"); return
+    sid = inp.get("session_id")
     if not os.path.exists(ap):
+        remember_created(sid, ap)
         debug("fast-path: new file"); return          # creating is not destroying
     state = git_state(ap)
+    if state == "untracked" and created_this_session(sid, ap):
+        debug("fast-path: created this session"); return
     if state == "clean":
         debug("fast-path: git clean"); return         # `git checkout --` restores it
     # Write only. NotebookEdit changes ONE cell, and a notebook is "modified"

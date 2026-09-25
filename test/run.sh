@@ -326,6 +326,10 @@ check "dispute: marks the last SPOKEN decision, not a silent pass" '[ "$dtarget"
 st=$(JEV_HOOKS_LOG="$dl" python3 bin/stats.py)
 check "stats: reports the hooks, the spoke rate and the dispute" 'echo "$st" | grep -q "stop_check" && echo "$st" | grep -q "disputed 1"'
 check "stats: names the near-threshold band that needs tuning" 'echo "$st" | grep -q "near a threshold"'
+# A failed call is a check that did not happen; the hooks fail open, so only stats can say so.
+printf '%s\n' '{"t":1790000000,"kind":"call","outcome":"http 403","secs":0.1,"usage":{}}' '{"t":1790000100,"kind":"call","outcome":"http 403","secs":0.1,"usage":{}}' >> "$dl"
+stf=$(JEV_HOOKS_LOG="$dl" python3 bin/stats.py)
+check "stats: failed Jev calls are reported, with the worst hour" 'echo "$stf" | grep -q "FAILED calls 2" && echo "$stf" | grep -q "http 403 2" && echo "$stf" | grep -qE "worst hours \(UTC\): [0-9]{2}-[0-9]{2} [0-9]{2}:00 2"'
 # Every record names the plugin version that made it, so a mixed log can be split.
 pv=$(python3 -c "import json;print(json.load(open('.claude-plugin/plugin.json'))['version'])")
 check "decision log: every decision is stamped with the plugin version" 'python3 -c "
@@ -527,6 +531,14 @@ out=$(eg "$(egin Write "{\"file_path\":\"$EG/brand-new.tf\",\"content\":\"x\"}" 
 check "edit gate: creating a new file never reaches Jev" '[ -z "$out" ] && grep -q "fast-path: new file" "$CLAUDE_PLUGIN_DATA/eg.err"'
 out=$(eg "$(egin Write "{\"file_path\":\"/tmp/eg-scratch.txt\",\"content\":\"x\"}" "$STEER")")
 check "edit gate: a scratch path never reaches Jev" '[ -z "$out" ] && grep -q "fast-path: scratch" "$CLAUDE_PLUGIN_DATA/eg.err"'
+# A file this session created is untracked only because it is not committed yet;
+# editing it again is not destroying unversioned work (60 of 70 logged prompts).
+egs() { python3 -c 'import json,sys;print(json.dumps({"tool_name":sys.argv[1],"tool_input":json.loads(sys.argv[2]),"cwd":sys.argv[3],"session_id":sys.argv[4]}))' "$@"; }
+out=$(eg "$(egs Write "{\"file_path\":\"$EG/made-here.go\",\"content\":\"x\"}" "$STEER" sess-A)"); seq 30 > "$EG/made-here.go"
+out=$(eg "$(egs Edit "{\"file_path\":\"$EG/made-here.go\",\"old_string\":\"1\",\"new_string\":\"x\"}" "$STEER" sess-A)")
+check "edit gate: an untracked file THIS session created does not ask again" '[ -z "$out" ] && grep -q "fast-path: created this session" "$CLAUDE_PLUGIN_DATA/eg.err"'
+out=$(eg "$(egs Edit "{\"file_path\":\"$EG/made-here.go\",\"old_string\":\"1\",\"new_string\":\"x\"}" "$STEER" sess-B)")
+check "edit gate: the same untracked file from ANOTHER session still asks" 'echo "$out" | grep -q "\"permissionDecision\": \"ask\""'
 out=$(eg "$(egin Read "{\"file_path\":\"$EG/tracked.tf\"}" "$STEER")")
 check "edit gate: a tool it does not gate is ignored" '[ -z "$out" ]'
 
@@ -682,6 +694,11 @@ check "hint: a design prompt on opus suggests the design model" 'echo "$out" | g
 check "hint: the suggestion carries its probability" 'echo "$out" | grep -qE "p=0\.[0-9]+"'
 out=$(pr "$(pr_in 'Compare the two designs for the evidence pipeline and recommend one. [kind=pick:question] [model=pick:fable]' "$TX" h1)")
 check "hint: the same advice is not repeated to the same session" '! echo "$out" | grep -q "/model"'
+out=$(pr "$(pr_in 'Rename the variable in these three files. [kind=pick:change_request] [model=pick:sonnet]' "$TX" h1)")
+check "hint: DIFFERENT advice on the same session model is not a second hint" '! echo "$out" | grep -q "/model"'
+TX2=$(mktx claude-sonnet-5)
+out=$(pr "$(pr_in 'Compare the two designs for the evidence pipeline and recommend one. [kind=pick:question] [model=pick:fable]' "$TX2" h1)")
+check "hint: after the user switches models, one new hint may come" 'echo "$out" | grep -q "/model fable"'
 out=$(pr "$(pr_in 'Make the failing worker test pass. [kind=pick:change_request] [model=pick:opus]' "$TX" h2)")
 check "hint: silent when the running model already fits" '! echo "$out" | grep -q "/model"'
 
@@ -863,6 +880,15 @@ out=$(bgin "$bg_msg" '[{"id":"t1","type":"shell","status":"running","description
 check "stop check: a not-done status while background_tasks is non-empty passes" '[ -z "$out" ]'
 out=$(bgin "$bg_msg" '[]' | python3 hooks/stop_selfcheck.py)
 check "stop check: the same words with nothing in flight still block" 'echo "$out" | grep -q "\"decision\": \"block\""'
+# With work in flight, promise and unanswered need 0.9 (JEV_HOOKS_STOP_IN_FLIGHT_AT), not 0.7:
+# 74 of 199 logged blocks fired with work running, promise/unanswered at median 0.83.
+job='[{"id":"t1","type":"shell","status":"running","description":"roll"}]'
+out=$(bgin "Rolling it now; I will report the result. [promise=p:0.8] [unanswered=p:0.8] [unverified=no]" "$job" | python3 hooks/stop_selfcheck.py)
+check "stop check: in flight, a 0.8 promise/unanswered no longer blocks" '[ -z "$out" ]'
+out=$(bgin "Rolling it now. I'll also rewrite the README. [promise=yes] [unanswered=no] [unverified=no]" "$job" | python3 hooks/stop_selfcheck.py)
+check "stop check: in flight, a confident unrelated promise still blocks" 'echo "$out" | grep -q "\"decision\": \"block\""'
+out=$(bgin "Rolled; all 28 services match. [promise=no] [unanswered=no] [unverified=p:0.8]" "$job" | python3 hooks/stop_selfcheck.py)
+check "stop check: in flight does not excuse an unverified claim" 'echo "$out" | grep -q "\"decision\": \"block\""'
 out=$(bgin "Build is green. I'll open the PR next. [promise=yes] [unanswered=no] [unverified=no]" '[{"id":"t1","type":"shell","status":"running","description":"tail logs"}]' | python3 hooks/stop_selfcheck.py)
 check "stop check: in-flight work does not excuse a plain promise about something else" 'echo "$out" | grep -q "\"decision\": \"block\""'
 # The record shows what a Write put in the file, and that a command was refused.
@@ -1000,6 +1026,10 @@ CMDS
 check "outward: global options, wrappers and subshells still ask" '[ -z "$missed" ] || { echo "   missed:$missed"; false; }'
 check "outward: a push on its own LINE still asks" '[ "$(ow "$(printf "git add -A\ngit push origin main")")" = "True" ]'
 check "outward: reading about deletes is not a delete" '[ "$(ow "kubectl get pods -o yaml | grep delete")" = "False" ] && [ "$(ow "git -C repo status")" = "False" ]'
+owm() { python3 -c "import sys,importlib.util;sys.path.insert(0,'lib');s=importlib.util.spec_from_file_location('g','hooks/bash_risk_gate.py');g=importlib.util.module_from_spec(s);s.loader.exec_module(g);print(bool(g.outward_match(sys.argv[1])))" "$1"; }
+check "outward: a push inside a loop or if body still asks" '[ "$(owm "for i in 1 2; do git push -u origin b; done")" = "True" ] && [ "$(owm "if true; then gh pr merge 3 --squash; fi")" = "True" ]'
+check "outward: gh api writes and repo changes ask; gh api reads do not" '[ "$(owm "gh api -X DELETE repos/o/r/git/refs/heads/x")" = "True" ] && [ "$(owm "gh api --method PATCH repos/o/r -f x=y")" = "True" ] && [ "$(owm "gh repo edit o/r --visibility public")" = "True" ] && [ "$(owm "gh api repos/o/r/contents/x -q .name")" = "False" ] && [ "$(owm "gh pr checks 3")" = "False" ]'
+check "outward: a heredoc BODY that mentions git push is not a push" '[ "$(owm "$(printf "git commit -q -F - <<'"'"'EOF'"'"'\nfix\ngit push origin main is next\nEOF")")" = "False" ] && [ "$(owm "$(printf "cat > x <<EOF\nhi\nEOF\ngit push")")" = "True" ]'
 
 
 
