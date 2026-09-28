@@ -837,6 +837,31 @@ before=$(wc -l < "$JEV_STUB_RECORD")
 out=$(mr '{"tool_name":"Agent","tool_input":{"description":"d"}}')
 check "router: a spawn with no task never reaches the judge" '[ -z "$out" ] && [ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
 
+# Every path the judge answered on is on the record - routed, declined, already
+# there - with the description, the pick and the distribution. Never the task
+# prompt: a brief quotes private code, and the description is enough to find it.
+export JEV_HOOKS_LOG="$CLAUDE_PLUGIN_DATA/router.log"; rm -f "$JEV_HOOKS_LOG"
+mr "$(agent 'SECRET-BRIEF-TEXT find the file. [model=pick:haiku]' '{"description":"find the config loader"}')" >/dev/null
+JEV_HOOKS_ROUTER_MIN=0.99 JEV_HOOKS_ROUTER_TIER=0.99 mr "$(agent 'SECRET-BRIEF-TEXT find it. [model=pick:haiku]' '{"description":"unsure"}')" >/dev/null
+out=$(JEV_HOOKS_ROUTER_FORCE=1 mr "$(agent 'SECRET-BRIEF-TEXT find it. [model=pick:haiku]' '{"model":"haiku","description":"already there"}')")
+check "router: a spawn already on its pick is left alone" '[ -z "$out" ]'
+recs=$(python3 -c '
+import json,sys
+r=[json.loads(l) for l in open(sys.argv[1]) if "\"model_router\"" in l]
+print(" ".join(x["decision"] for x in r))
+ok=all(x.get("top")=="haiku" and x.get("dist",{}).get("haiku")==0.9 and x.get("agent_type")=="general-purpose" for x in r)
+ok=ok and [x.get("pick") for x in r]==["haiku",None,"haiku"]
+print("ok" if ok else "bad")
+print("|".join(x.get("description","") for x in r))' "$JEV_HOOKS_LOG")
+check "router: routed, declined and already-there are all recorded" '[ "$(echo "$recs" | sed -n 1p)" = "haiku no_route already" ]'
+check "router: each record carries the pick (none when declined), the top choice, the distribution and the agent type" '[ "$(echo "$recs" | sed -n 2p)" = ok ]'
+check "router: each record carries the description" '[ "$(echo "$recs" | sed -n 3p)" = "find the config loader|unsure|already there" ]'
+check "router: the task prompt is never recorded" '! grep -q SECRET-BRIEF-TEXT "$JEV_HOOKS_LOG"'
+long=$(python3 -c 'print("x"*300)')
+mr "$(agent 'find it. [model=pick:haiku]' "{\"description\":\"$long\"}")" >/dev/null
+check "router: a long description is clipped to 120 chars" '[ "$(tail -1 "$JEV_HOOKS_LOG" | python3 -c "import json,sys;print(len(json.load(sys.stdin)[\"description\"]))")" = 120 ]'
+unset JEV_HOOKS_LOG
+
 # --- verify: the SUBAGENT's transcript, never the parent's (2026-09-21) ---------------
 # Four forks spawned in one turn were each judged against the criteria of the fork
 # spawned LAST: the hook read transcript_path, which on SubagentStop is the PARENT's
