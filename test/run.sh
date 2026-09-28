@@ -146,6 +146,14 @@ out=$(stopin "I'll do it next. [promise=yes] [unanswered=yes] [unverified=yes]" 
 check "stop: never blocks twice (stop_hook_active)" '[ -z "$out" ]'
 out=$(stopin "I'll do it next. [promise=yes]" 0 | TYPESAFE_BASE_URL=http://127.0.0.1:1 python3 hooks/stop_selfcheck.py)
 check "stop: Jev unreachable fails open" '[ -z "$out" ]'
+# A number from the MIDDLE of a long result is cut by the clip; grep over the raw
+# transcript still finds it, and the judge is told so. An invented one is not.
+cf="$PWD/test/fixtures/stop_clipped_table.jsonl"
+before=$(wc -l < "$JEV_STUB_RECORD")
+python3 -c "import json,sys;print(json.dumps({'transcript_path':sys.argv[1],'last_assistant_message':'There are 8,449 stop_check decisions and 1,103 in band, plus 5,118 elsewhere.','session_id':'s'}))" "$cf" | python3 hooks/stop_selfcheck.py >/dev/null
+req=$(tail -n +$((before+1)) "$JEV_STUB_RECORD")
+check "stop: a number clipped from the window but in the full output is named as found" 'echo "$req" | grep -q "numbers_found_in_full_output" && echo "$req" | python3 -c "import sys;t=sys.stdin.read();i=t.index(\"numbers_found_in_full_output\");sys.exit(0 if \"8449\" in t[i:i+120] and \"1103\" in t[i:i+120] else 1)"'
+check "stop: a number in no output is named as not found" 'echo "$req" | python3 -c "import sys;t=sys.stdin.read();i=t.index(\"numbers_not_found_in_output\");sys.exit(0 if \"5118\" in t[i:i+80] else 1)"'
 # --- end stop self-check
 
 # --- audit fixes (2026-09-19) ---------------------------------------------------------
