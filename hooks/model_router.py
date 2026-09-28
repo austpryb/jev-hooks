@@ -112,14 +112,26 @@ def main():
     floor, tier = envfloat("JEV_HOOKS_ROUTER_MIN", 0.5), envfloat("JEV_HOOKS_ROUTER_TIER", 0.7)
     pick = choose(probs, models, floor, tier)
     conf = float(probs.get(pick) or 0)
+    # Every path the judge answered on is recorded, the silent ones too: under
+    # 0.23.0 only a reroute was, and without the task nothing could be audited.
+    # The DESCRIPTION goes on the record, never the prompt - a task brief quotes
+    # private code, paths and incident details; the log is local, but it is read
+    # and pasted into reviews, and a 120-char label is enough to find the spawn.
+    def rec(decision):
+        jev.record("model_router", decision, a, note=f"confidence={conf:.2f}",
+                   agent_type=state["agent_type"], description=(state["description"] or "")[:120] or None,
+                   pick=pick, top=max(probs, key=lambda m: float(probs[m])) if probs else None,
+                   dist={m: round(float(p), 3) for m, p in probs.items()})
     if not pick:
         debug(f"no route: probs={probs} floor={floor} tier={tier}")
+        rec("no_route")              # the spawn inherits the parent's model
         return
     if pick == chosen:
-        return                       # already going there; say nothing
+        rec("already")               # already going there; say nothing
+        return
     out = dict(ti)
     out["model"] = pick
-    jev.record("model_router", pick, a, note=f"confidence={conf:.2f}", agent_type=state["agent_type"])
+    rec(pick)
     print(json.dumps({
         "systemMessage": f"jev-hooks: routing this subagent to {pick} ({conf:.2f}).",
         "hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": out}}))
