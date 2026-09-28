@@ -77,7 +77,7 @@ def main():
     print()
     for hook in sorted(by_hook):
         total = sum(by_hook[hook].values())
-        spoke = sum(n for d, n in by_hook[hook].items() if d not in ("pass", "silent", "counting"))
+        spoke = sum(n for d, n in by_hook[hook].items() if d not in ("pass", "silent", "counting", "read-only"))
         d = f"  disputed {disputed[hook]}" if disputed[hook] else ""
         print(f"{hook:<18} {total:>4} decisions, spoke {spoke} ({100*spoke//total if total else 0}%){d}")
         for dec, n in by_hook[hook].most_common():

@@ -1080,6 +1080,85 @@ check "outward: gh api writes and repo changes ask; gh api reads do not" '[ "$(o
 check "outward: a heredoc BODY that mentions git push is not a push" '[ "$(owm "$(printf "git commit -q -F - <<'"'"'EOF'"'"'\nfix\ngit push origin main is next\nEOF")")" = "False" ] && [ "$(owm "$(printf "cat > x <<EOF\nhi\nEOF\ngit push")")" = "True" ]'
 
 
+# --- 2026-09-27 retune (decision log joined to transcripts) -------------------
+# The fast path grew by families that reached Jev ~1,150 times and were never
+# once prompted: vitest runs, read-only git subcommands, a lone sed s///,
+# gofmt -l, and loop/if scaffolding. Each must still refuse its writing form.
+gained_lost=""
+while IFS= read -r c; do [ -n "$c" ] && [ "$(ro "$c")" = "False" ] && gained_lost="$gained_lost | $c"; done <<'CMDS'
+bunx vitest run src/a.test.ts 2>&1 | tail -5
+npx vitest run
+git grep -n "func main" -- '*.go'
+git -C ../other log --oneline -3
+git ls-tree --name-only origin/master db/
+git merge-base --is-ancestor abc origin/main && echo yes
+git worktree list
+git status --short | sed 's/^/  /'
+sed -E 's#a/b#c#g' notes.txt
+sed -n '$p' f.txt
+gofmt -l . | grep -v vendor
+for f in a.go b.go; do grep -n TODO $f; done
+until grep -q ready log.txt; do sleep 2; done
+if [ -f go.mod ]; then head -3 go.mod; fi
+CMDS
+check "fast path: vitest, read-only git, sed s///, gofmt -l and loop scaffolding take it" '[ -z "$gained_lost" ] || { echo "   judged:$gained_lost"; false; }'
+gained_open=""
+while IFS= read -r c; do [ -n "$c" ] && [ "$(ro "$c")" = "True" ] && gained_open="$gained_open | $c"; done <<'CMDS'
+sed -n '1e touch p' f
+echo hi | sed -n 's/.*/touch pwned/ep'
+sed 's/a/b/w out.txt' f
+sed 's/a/b/e' f
+sed '1d' f
+sed -e 's/a/b/' f
+gofmt -l -w .
+gofmt -lw .
+npx vitest -u
+bunx vitest run --outputFile=report.json
+git grep -Ovim foo
+git -C ../other push
+git -C ../other reset --hard
+git worktree remove ../x
+git config user.name x
+for f in a b; do rm -f $f; done
+if true; then rm -rf build; fi
+until false; do git push; done
+for f in $(ls); do cat $f; done
+CMDS
+check "fast path: the new families' writing and executing forms are still judged (incl. sed 'e' that used to pass)" '[ -z "$gained_open" ] || { echo "   still open:$gained_open"; false; }'
+
+# `git reset --hard` asks without a judge: 8 of 8 in the log were prompted
+# anyway, and one replayed at 0.64 after a small rewording - under the line.
+dm() { python3 -c "import sys,importlib.util;sys.path.insert(0,'lib');s=importlib.util.spec_from_file_location('g','hooks/bash_risk_gate.py');g=importlib.util.module_from_spec(s);s.loader.exec_module(g);print(bool(g.discard_match(sys.argv[1])))" "$1"; }
+check "discard: git reset --hard asks, in a chain, through -C and inside a loop body" '[ "$(dm "cd x && git reset -q --hard 0a30a76 && go test")" = "True" ] && [ "$(dm "git -C ../r reset --hard")" = "True" ] && [ "$(dm "for r in a b; do git -C \$r reset --hard; done")" = "True" ]'
+check "discard: a soft reset, a grep for it, and a commit message naming it do not" '[ "$(dm "git reset --soft HEAD~1")" = "False" ] && [ "$(dm "grep -n \"git reset --hard\" notes.md")" = "False" ] && [ "$(dm "$(printf "git commit -F - <<'"'"'EOF'"'"'\nfix\ngit reset --hard is next\nEOF")")" = "False" ]'
+before=$(wc -l < "$JEV_STUB_RECORD")
+out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git reset --hard origin/main"}}' | python3 hooks/bash_risk_gate.py)
+check "discard: it asks and spends no Jev call" 'echo "$out" | grep -q "\"permissionDecision\": \"ask\"" && echo "$out" | grep -q "discards every uncommitted change" && [ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
+out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git reset --hard origin/main"}}' | TYPESAFE_BASE_URL=http://127.0.0.1:1 python3 hooks/bash_risk_gate.py)
+check "discard: it still asks with the judge down" 'echo "$out" | grep -q "\"permissionDecision\": \"ask\""'
+
+# Git tells the judge whether an edit is undoable; the judge is not left to guess.
+gs=$(mktemp -d)
+printf '%s' "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"python3 - <<EOF\\nopen('a.txt','w').write('x')\\nEOF # gitfact-in\"},\"cwd\":\"$PWD\"}" | python3 hooks/bash_risk_gate.py >/dev/null
+printf '%s' "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"python3 - <<EOF\\nopen('a.txt','w').write('x')\\nEOF # gitfact-out\"},\"cwd\":\"$gs\"}" | python3 hooks/bash_risk_gate.py >/dev/null
+printf '%s' "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"cd $PWD && touch zz # gitfact-cd\"},\"cwd\":\"$gs\"}" | python3 hooks/bash_risk_gate.py >/dev/null
+check "git fact: a command inside a work tree says so to the judge" 'grep "gitfact-in" "$JEV_STUB_RECORD" | grep -q "inside a git work tree (branch"'
+check "git fact: one outside any work tree says nothing restores it" 'grep "gitfact-out" "$JEV_STUB_RECORD" | grep -q "not inside a git work tree"'
+check "git fact: a leading cd decides the directory, not the session cwd" 'grep "gitfact-cd" "$JEV_STUB_RECORD" | grep -q "inside a git work tree ("'
+rmdir "$gs"
+
+# Every path leaves a record: the fast path, the judge being down, the judged one.
+rl=$(mktemp)
+printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git status"}}' | JEV_HOOKS_LOG="$rl" python3 hooks/bash_risk_gate.py
+printf '%s' '{"tool_name":"Bash","tool_input":{"command":"make build"}}' | JEV_HOOKS_LOG="$rl" TYPESAFE_BASE_URL=http://127.0.0.1:1 python3 hooks/bash_risk_gate.py
+printf '%s' '{"tool_name":"Bash","tool_input":{"command":"cd /x && make build && rm -rf out"}}' | JEV_HOOKS_LOG="$rl" python3 hooks/bash_risk_gate.py
+check "record: the read-only fast path is logged as its own verdict" 'grep "\"hook\": \"bash_gate\"" "$rl" | grep -q "\"decision\": \"read-only\""'
+check "record: a judge that is down is logged, not silent" 'grep -q "\"note\": \"judge unavailable\"" "$rl"'
+check "record: a judged command carries its family, length and a hash to join the transcript" 'grep "make build && rm" "$rl" | grep -q "\"family\": \[\"make build\", \"rm -rf\"\]" && grep "make build && rm" "$rl" | grep -q "\"sha\": \""'
+st=$(python3 bin/stats.py "$rl")
+check "stats: a read-only record is not counted as the gate speaking" 'echo "$st" | grep -qE "^bash_gate +3 decisions, spoke 0 "'
+rm -f "$rl"
+
 
 
 # --- per-hook switches (JEV_HOOKS_DISABLE)
