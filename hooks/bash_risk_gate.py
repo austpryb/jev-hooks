@@ -254,6 +254,41 @@ def strip_heredocs(cmd):
     return _HEREDOC.sub(lambda m: m.group(0).split("\n", 1)[0], cmd)
 
 
+# Headless graph workers (claude -p, bin/graph-dispatch) finish a node and fail
+# only at `git push`: OUTWARD asks, and with nobody to answer an ask is a denial.
+# The hook cannot see whether a session has an approval surface: its stdin holds
+# permission_mode (identical for `claude -p` and an interactive session) and no
+# headless flag. So the signal is explicit and opt-in: the launcher sets
+# JEV_HOOKS_HEADLESS=1 for the worker it starts. An interactive session never
+# has it unless a person exports it, and then they have asked for it.
+# The allow is one shape only: `git [-C dir] push [-u] <remote> graph/<key>`
+# (or HEAD:graph/<key>) as the whole command. No force (flag or +refspec), no
+# tags, mirror, delete, all, no URL remote, no chaining: everything else falls
+# through to the unchanged gate.
+GRAPH_BRANCH = re.compile(r"^(?:HEAD:)?graph/[A-Za-z0-9][A-Za-z0-9._-]*$")
+_PUSH_OK_FLAGS = {"-u", "--set-upstream", "-q", "--quiet", "-v", "--verbose"}
+_REMOTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def headless_graph_push(cmd):
+    if os.environ.get("JEV_HOOKS_HEADLESS") != "1":
+        return False
+    if re.search(r"[$`;&|<>()\\\n\r{}*?\[]", cmd) or UNSAFE.search(cmd):
+        return False
+    segs = split_segments(cmd)
+    if len(segs) != 1:
+        return False
+    t = _tokens(_GIT_C.sub(r"\1 ", segs[0]))
+    if not t or len(t) < 4 or t[0] != "git" or t[1] != "push":
+        return False
+    args = t[2:]
+    flags = [x for x in args if x.startswith("-")]
+    pos = [x for x in args if not x.startswith("-")]
+    if any(f not in _PUSH_OK_FLAGS for f in flags):
+        return False
+    return len(pos) == 2 and bool(_REMOTE.match(pos[0])) and bool(GRAPH_BRANCH.match(pos[1]))
+
+
 def outward_match(cmd):
     return OUTWARD.search(strip_heredocs(cmd))
 
@@ -419,6 +454,11 @@ def main():
         # path nobody can audit, and the 2026-09-21 bypass audit had to rebuild it
         # from transcripts.
         jev.record("bash_gate", "read-only", None, command=cmd[:200], len=len(cmd))
+        return
+    if headless_graph_push(cmd):
+        jev.record("bash_gate", "allow", None, note="headless graph push", **_audit(cmd))
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+            "permissionDecisionReason": "jev-hooks: push of a graph/<key> branch from a headless worker (JEV_HOOKS_HEADLESS=1)."}}))
         return
     m = outward_match(cmd)
     if m:

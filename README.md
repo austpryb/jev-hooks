@@ -150,6 +150,17 @@ hundreds of calls earlier into view, so a block on it stands — re-verifying wa
 one query. Dropping loop_detect's `counting` records was also wrong: each is a
 paid judgment with a score, not bookkeeping.
 
+### Headless workers: pushing a `graph/<key>` branch
+
+`git push` always asks (outward). A headless worker (`claude -p`, `bin/graph-dispatch`) has no one to
+answer, so the ask is a denial and a finished node cannot be pushed. The hook cannot tell a session has
+no approval surface: its stdin carries `permission_mode`, identical for `claude -p` and an interactive
+session, and nothing else says "headless". So the signal is explicit: the launcher sets
+`JEV_HOOKS_HEADLESS=1`, and only then is exactly one shape allowed: `git [-C dir] push [-u] <remote>
+graph/<key>` (or `HEAD:graph/<key>`) as the whole command. Force (flag or `+refspec`), `--tags`,
+`--mirror`, `--delete`, `:ref`, `main`/`master`, any non-`graph/` branch, a URL remote and any chaining
+or substitution keep today's ask. Interactive sessions never set the variable.
+
 ### Tuning the Bash gate on a mixed log
 
 A first pass at the gate's prompt rate, 2026-09-21, found the log itself was the
@@ -548,7 +559,7 @@ their terms before enabling this on a repository whose prompts are sensitive.
 ## Test
 
 ```bash
-bash test/run.sh      # 254 checks against a local stub; no key, no network
+bash test/run.sh      # 275 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),
