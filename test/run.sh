@@ -44,6 +44,33 @@ check "gate: a dry run is not a push" '! echo "$out" | grep -q "publishes, merge
 # Anchored to a segment start, so prose that names a push is not one.
 out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"echo \"then run git push origin main\" > /tmp/notes.txt"}}' | python3 hooks/bash_risk_gate.py)
 check "gate: a command that merely MENTIONS a push is not treated as one" '! echo "$out" | grep -q "publishes, merges or deploys"'
+# Headless graph workers: JEV_HOOKS_HEADLESS=1 (set by the launcher) lets ONE shape through -
+# a push of graph/<key> - and nothing else. Without it, or for any other push, the gate is unchanged.
+gp() { printf '%s' "$(python3 -c 'import json,sys;print(json.dumps({"tool_name":"Bash","tool_input":{"command":sys.argv[1]}}))' "$1")" | JEV_HOOKS_HEADLESS=${2:-} python3 hooks/bash_risk_gate.py; }
+allowed() { gp "$1" 1 | grep -q '"permissionDecision": "allow"'; }
+asked() { gp "$1" 1 | grep -q '"permissionDecision": "ask"'; }
+check "headless: git push -u origin graph/foo is allowed" 'allowed "git push -u origin graph/foo"'
+check "headless: git -C <dir> push origin graph/foo-1.2 is allowed" 'allowed "git -C ~/apps/x push origin graph/foo-1.2"'
+check "headless: HEAD:graph/foo is allowed" 'allowed "git push origin HEAD:graph/foo"'
+check "headless: --force still asks" 'asked "git push --force origin graph/foo"'
+check "headless: -f still asks" 'asked "git push -f origin graph/foo"'
+check "headless: --force-with-lease still asks" 'asked "git push --force-with-lease origin graph/foo"'
+check "headless: +refspec force still asks" 'asked "git push origin +graph/foo"'
+check "headless: push to main still asks" 'asked "git push origin main"'
+check "headless: push to master still asks" 'asked "git push -u origin master"'
+check "headless: HEAD:main still asks" 'asked "git push origin HEAD:main"'
+check "headless: --tags still asks" 'asked "git push --tags origin graph/foo"'
+check "headless: --mirror still asks" 'asked "git push --mirror origin"'
+check "headless: --delete still asks" 'asked "git push --delete origin graph/foo"'
+check "headless: :graph/foo (delete refspec) still asks" 'asked "git push origin :graph/foo"'
+check "headless: a non-graph branch still asks" 'asked "git push -u origin feat/foo"'
+check "headless: graph/ prefix lookalike still asks" 'asked "git push origin graphs/foo"'
+check "headless: a URL remote still asks" 'asked "git push git@evil.example:x/y.git graph/foo"'
+check "headless: chained command still asks" 'asked "git push origin graph/foo && git push origin main"'
+check "headless: substitution in the branch still asks" 'asked "git push origin graph/\$(whoami)"'
+check "interactive: graph push still asks (no JEV_HOOKS_HEADLESS)" 'gp "git push -u origin graph/foo" | grep -q "\"permissionDecision\": \"ask\""'
+check "interactive: JEV_HOOKS_HEADLESS=0 still asks" 'gp "git push -u origin graph/foo" 0 | grep -q "\"permissionDecision\": \"ask\""'
+
 
 # --- precompact triage + sessionstart reinject
 printf '%s' "{\"session_id\":\"s1\",\"transcript_path\":\"$PWD/test/fixtures/session.jsonl\",\"hook_event_name\":\"PreCompact\",\"trigger\":\"auto\"}" | python3 hooks/precompact_triage.py
