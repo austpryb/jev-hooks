@@ -160,6 +160,7 @@ session, and nothing else says "headless". So the signal is explicit: the launch
 graph/<key>` (or `HEAD:graph/<key>`) as the whole command. Force (flag or `+refspec`), `--tags`,
 `--mirror`, `--delete`, `:ref`, `main`/`master`, any non-`graph/` branch, a URL remote and any chaining
 or substitution keep today's ask. Interactive sessions never set the variable.
+Since 0.26.0 two more shapes pass under the same variable: `gh pr create` (only `--title/--body/--body-file/--fill/--draft`, no `--base`/`--head`) while the current branch is `graph/<key>`, and `[path/]land-pr.sh <pr> [--timeout N]` when that PR's head is `graph/<key>`. `gh pr merge` and everything else still ask.
 
 ### Tuning the Bash gate on a mixed log
 
@@ -559,7 +560,7 @@ their terms before enabling this on a repository whose prompts are sensitive.
 ## Test
 
 ```bash
-bash test/run.sh      # 275 checks against a local stub; no key, no network
+bash test/run.sh      # 287 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),
