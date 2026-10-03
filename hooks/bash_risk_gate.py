@@ -289,6 +289,70 @@ def headless_graph_push(cmd):
     return len(pos) == 2 and bool(_REMOTE.match(pos[0])) and bool(GRAPH_BRANCH.match(pos[1]))
 
 
+# Same opt-in, two more shapes, so a worker can finish what the push started:
+# `gh pr create` while the work dir's branch is graph/<key>, and
+# `[<path>/]land-pr.sh <pr> [--timeout N]` when that PR's head is graph/<key>.
+# land-pr.sh waits for green CI and refuses red, so merging stays gated by CI and
+# branch protection. `gh pr merge`, releases, deploys and any other branch keep
+# the ask. --base/--head/--repo/--web are not allowed: the target is the default.
+_PR_OK_FLAGS = {"--title": 1, "-t": 1, "--body": 1, "-b": 1, "--body-file": 1, "-F": 1, "--fill": 0, "--draft": 0, "-d": 0}
+_LAND = re.compile(r"^(?:[A-Za-z0-9._/~-]+/)?land-pr\.sh$")
+_GRAPH_REF = re.compile(r"^graph/[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _plain(cmd):
+    """cmd with quoted text that cannot expand removed: single-quoted strings and
+    double-quoted ones holding no $, backtick or backslash (a PR body)."""
+    cmd = re.sub(r"'[^']*'", "'X'", cmd)
+    return re.sub(r'"[^"$`\\]*"', '"X"', cmd)
+
+
+def _headless_single(cmd):
+    if os.environ.get("JEV_HOOKS_HEADLESS") != "1":
+        return None
+    plain = _plain(cmd)
+    if re.search(r"[$`;&|<>()\\\n\r{}*?\[]", plain) or UNSAFE.search(plain):
+        return None
+    if len(split_segments(cmd)) != 1:
+        return None
+    return _tokens(cmd)
+
+
+def _git_out(args, d):
+    import subprocess
+    try:
+        r = subprocess.run(args, cwd=d, capture_output=True, text=True, timeout=20)
+    except Exception:
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def headless_graph_pr(cmd, cwd):
+    t = _headless_single(cmd)
+    if not t:
+        return None
+    d = cwd or os.getcwd()
+    if t[:3] == ["gh", "pr", "create"]:
+        i, args = 3, t
+        while i < len(args):
+            a = args[i]
+            if a not in _PR_OK_FLAGS:
+                return None
+            i += 1 + _PR_OK_FLAGS[a]
+            if i > len(args):
+                return None
+        if _GRAPH_REF.match(_git_out(["git", "branch", "--show-current"], d)):
+            return "gh pr create from a graph/<key> branch"
+        return None
+    if len(t) >= 2 and _LAND.match(t[0]) and t[1].isdigit():
+        rest = t[2:]
+        if rest and not (len(rest) == 2 and rest[0] == "--timeout" and rest[1].isdigit()):
+            return None
+        if _GRAPH_REF.match(_git_out(["gh", "pr", "view", t[1], "--json", "headRefName", "-q", ".headRefName"], d)):
+            return "land-pr.sh on a graph/<key> PR"
+    return None
+
+
 def outward_match(cmd):
     return OUTWARD.search(strip_heredocs(cmd))
 
@@ -459,6 +523,12 @@ def main():
         jev.record("bash_gate", "allow", None, note="headless graph push", **_audit(cmd))
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
             "permissionDecisionReason": "jev-hooks: push of a graph/<key> branch from a headless worker (JEV_HOOKS_HEADLESS=1)."}}))
+        return
+    why = headless_graph_pr(cmd, inp.get("cwd"))
+    if why:
+        jev.record("bash_gate", "allow", None, note="headless " + why, **_audit(cmd))
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+            "permissionDecisionReason": f"jev-hooks: {why} from a headless worker (JEV_HOOKS_HEADLESS=1)."}}))
         return
     m = outward_match(cmd)
     if m:

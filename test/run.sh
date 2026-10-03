@@ -71,6 +71,28 @@ check "headless: substitution in the branch still asks" 'asked "git push origin 
 check "interactive: graph push still asks (no JEV_HOOKS_HEADLESS)" 'gp "git push -u origin graph/foo" | grep -q "\"permissionDecision\": \"ask\""'
 check "interactive: JEV_HOOKS_HEADLESS=0 still asks" 'gp "git push -u origin graph/foo" 0 | grep -q "\"permissionDecision\": \"ask\""'
 
+# headless PR create / land-pr.sh: a real repo for the branch, a gh stub for the PR head.
+pr_t=$(mktemp -d); git init -q "$pr_t/r"; git -C "$pr_t/r" commit -q --allow-empty -m i
+mkdir "$pr_t/bin"; printf '#!/bin/sh\ncase "$3" in 7) echo graph/x;; *) echo feature/y;; esac\n' > "$pr_t/bin/gh"; chmod +x "$pr_t/bin/gh"
+pp() { # cmd branch [headless]
+  git -C "$pr_t/r" checkout -q -B "$2"
+  printf '%s' "$(python3 -c 'import json,sys;print(json.dumps({"tool_name":"Bash","cwd":sys.argv[2],"tool_input":{"command":sys.argv[1]}}))' "$1" "$pr_t/r")" | PATH="$pr_t/bin:$PATH" JEV_HOOKS_HEADLESS=${3-1} python3 hooks/bash_risk_gate.py; }
+pallow() { pp "$1" "$2" "${3-1}" | grep -q '"permissionDecision": "allow"'; }
+pask() { pp "$1" "$2" "${3-1}" | grep -q '"permissionDecision": "ask"'; }
+check "headless: gh pr create on graph/x is allowed" 'pallow "gh pr create --title t --body \"b (x); y\"" graph/x'
+check "headless: gh pr create on main asks" 'pask "gh pr create --title t" main'
+check "headless: gh pr create on feature/x asks" 'pask "gh pr create --title t" feature/x'
+check "headless: gh pr create --base main asks" 'pask "gh pr create --base main --title t" graph/x'
+check "headless: gh pr create chained asks" 'pask "gh pr create --title t && gh pr merge 7" graph/x'
+check "headless: gh pr create with substitution asks" 'pask "gh pr create --title \"\$(id)\"" graph/x'
+check "headless: land-pr.sh for a graph/ head is allowed" 'pallow "~/.claude/plugins/cache/a/enforcer-graph/1/bin/land-pr.sh 7 --timeout 3000" main'
+check "headless: land-pr.sh for another head is not allowed" '! pallow "land-pr.sh 8 --timeout 3000" graph/x'
+check "headless: land-pr.sh with extra args is not allowed" '! pallow "land-pr.sh 7 --admin" graph/x'
+check "headless: gh pr merge still asks" 'pask "gh pr merge 7 --squash" graph/x'
+check "interactive: gh pr create on graph/x still asks" 'pask "gh pr create --title t" graph/x 0'
+check "interactive: land-pr.sh still asks or is judged, never allowed" '! pallow "land-pr.sh 7" graph/x 0'
+rm -rf "$pr_t"
+
 
 # --- precompact triage + sessionstart reinject
 printf '%s' "{\"session_id\":\"s1\",\"transcript_path\":\"$PWD/test/fixtures/session.jsonl\",\"hook_event_name\":\"PreCompact\",\"trigger\":\"auto\"}" | python3 hooks/precompact_triage.py
