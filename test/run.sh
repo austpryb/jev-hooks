@@ -11,6 +11,7 @@ trap 'kill $STUB 2>/dev/null' EXIT
 sleep 0.4
 export TYPESAFE_BASE_URL="http://127.0.0.1:$PORT" TYPESAFE_API_KEY=stub-key
 export CLAUDE_PLUGIN_DATA="$(mktemp -d)"
+export JEV_HOOKS_GOVERNOR=0   # detection stubbed off; the governor tests below flip it
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS  $1"; pass=$((pass+1)); else echo "FAIL  $1"; fail=$((fail+1)); fi; }
 
@@ -1266,6 +1267,20 @@ if command -v go >/dev/null 2>&1; then
   gt=$(cd loadout && go test ./... 2>&1)
   check "loadout: the Go launcher's tests pass" 'echo "$gt" | grep -q "^ok"'
 fi
+
+# --- governor deference: detection stubbed both ways
+gv() { printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}' | JEV_HOOKS_GOVERNOR=$1 python3 hooks/bash_risk_gate.py 2>"$JEV_STUB_ERR"; }
+JEV_STUB_ERR=$(mktemp)
+out=$(gv 1)
+check "governor installed: bash gate makes no decision" '[ -z "$out" ]'
+out=$(gv 0)
+check "governor absent: bash gate still decides (ask)" 'echo "$out" | grep -q "\"permissionDecision\": \"ask\""'
+check "governor absent: shared decision record on stderr" 'grep -q "^enforcer-governor:decision {\"decision\": \"ask\", \"code\": \"deploy_publish\", \"rule\": \"jev.outward\", \"tool\": \"Bash\"" "$JEV_STUB_ERR"'
+eg=$(mktemp -d -p "$PWD/test"); trap "kill \$STUB 2>/dev/null; rm -rf $eg" EXIT; printf 'x' > "$eg/f.txt"; git -C "$eg" init -q; git -C "$eg" add f.txt; git -C "$eg" -c user.email=a@b -c user.name=n commit -qm i; printf 'y' > "$eg/f.txt"
+ge() { printf '%s' "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$eg/f.txt\",\"content\":\"zz\"}}" | JEV_HOOKS_GOVERNOR=$1 python3 hooks/edit_risk_gate.py 2>"$JEV_STUB_ERR"; }
+check "governor installed: edit gate makes no decision" '[ -z "$(ge 1)" ]'
+check "governor absent: edit gate asks and emits the record" 'ge 0 | grep -q "\"ask\"" && grep -q "enforcer-governor:decision" "$JEV_STUB_ERR"'
+check "headless allow warns of deprecation" 'gp "git push -u origin graph/foo" 1 >/dev/null 2>"$JEV_STUB_ERR"; grep -q "JEV_HOOKS_HEADLESS is deprecated" "$JEV_STUB_ERR"'
 
 # The README states this number, and a number in prose drifts silently: it said
 # 111 while the suite ran 126, and the count of your own tests is the first

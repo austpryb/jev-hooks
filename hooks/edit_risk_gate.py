@@ -134,6 +134,9 @@ def main():
     tool = inp.get("tool_name")
     if tool not in TOOLS:
         return
+    if jev.governor_installed():
+        jev.record("edit_gate", "deferred", None, note="enforcer-governor decides")
+        return                       # policy belongs to the governor
     path, removing, adding = change(tool, inp.get("tool_input") or {})
     if not path:
         return
@@ -164,9 +167,8 @@ def main():
         # Deciding it here is cheaper, never flaps, and leaves Jev the question it is
         # actually good at: whether an unversioned file is precious or regenerable.
         jev.record("edit_gate", "ask", None, path=ap, git_state=state, note="deterministic: whole-file write over uncommitted changes")
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
-            "permissionDecisionReason": f"jev-hooks: {tool} replaces the whole of {os.path.basename(ap)}, which has "
-                                        "uncommitted changes — git cannot restore them. Commit or stash it first."}}))
+        jev.emit_decision(tool, "ask", "custom_rule", f"jev-hooks: {tool} replaces the whole of {os.path.basename(ap)}, which has "
+                          "uncommitted changes — git cannot restore them. Commit or stash it first.", "jev.whole_file_write")
         return
     if state == "modified":
         # Anything short of a whole-file write leaves the committed base in place and
@@ -232,8 +234,7 @@ def main():
         hint = (" Commit or stash it first, or read the file before overwriting." if state == "modified"
                 else " Nothing in git holds this — copy it aside before overwriting.")
     jev.record("edit_gate", decision, a, path=ap, git_state=state)
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
-                                              "permissionDecisionReason": "jev-hooks: " + reason + hint}}))
+    jev.emit_decision(tool, decision, "custom_rule", "jev-hooks: " + reason + hint, "jev.judge")
 
 
 if __name__ == "__main__":

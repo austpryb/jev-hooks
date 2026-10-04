@@ -150,7 +150,13 @@ hundreds of calls earlier into view, so a block on it stands — re-verifying wa
 one query. Dropping loop_detect's `counting` records was also wrong: each is a
 paid judgment with a score, not bookkeeping.
 
-### Headless workers: pushing a `graph/<key>` branch
+### Governor deference (0.27.0)
+
+When `enforcer-governor` is installed (detected by `ENFORCER_GOVERNOR=1` from its SessionStart hook, or its directory in the plugin cache; `JEV_HOOKS_GOVERNOR=1|0` forces it) `bash_risk_gate` and `edit_risk_gate` make **no allow/deny/ask decision**: policy belongs to the governor, and jev-hooks keeps the quality hooks (narrow_output, loop_detect, precompact_triage, stop_selfcheck, subagent_verify, model_router, prompt_routing). Without the governor the gates decide as before, so a machine without it is not left ungated, and each decision also writes the governor's record (`enforcer-governor:decision {decision, code, rule, tool, summary}`) to stderr so consumers parse one format.
+
+**`JEV_HOOKS_HEADLESS` is deprecated.** The governor's graph-worker rules own headless `graph/<key>` push, `gh pr create` and `land-pr.sh`. The variable is still read for one release, with a deprecation line on stderr, and will then be removed.
+
+### Headless workers: pushing a `graph/<key>` branch (deprecated)
 
 `git push` always asks (outward). A headless worker (`claude -p`, `bin/graph-dispatch`) has no one to
 answer, so the ask is a denial and a finished node cannot be pushed. The hook cannot tell a session has
@@ -560,7 +566,7 @@ their terms before enabling this on a repository whose prompts are sensitive.
 ## Test
 
 ```bash
-bash test/run.sh      # 287 checks against a local stub; no key, no network
+bash test/run.sh      # 293 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),
