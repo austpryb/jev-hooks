@@ -507,6 +507,9 @@ def main():
     inp = jev.read_stdin()
     if inp.get("tool_name") != "Bash":
         return
+    if jev.governor_installed():
+        jev.record("bash_gate", "deferred", None, note="enforcer-governor decides")
+        return                       # policy belongs to the governor
     ti = inp.get("tool_input") or {}
     cmd = ti.get("command") or ""
     if not cmd.strip():
@@ -521,28 +524,27 @@ def main():
         return
     if headless_graph_push(cmd):
         jev.record("bash_gate", "allow", None, note="headless graph push", **_audit(cmd))
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
-            "permissionDecisionReason": "jev-hooks: push of a graph/<key> branch from a headless worker (JEV_HOOKS_HEADLESS=1)."}}))
+        sys.stderr.write("jev-hooks: JEV_HOOKS_HEADLESS is deprecated; enforcer-governor's graph-worker rules own this. Install it.\n")
+        jev.emit_decision("Bash", "allow", "graph_push_allowed", "jev-hooks: push of a graph/<key> branch from a headless worker (JEV_HOOKS_HEADLESS=1).", "jev.headless_push")
         return
     why = headless_graph_pr(cmd, inp.get("cwd"))
     if why:
         jev.record("bash_gate", "allow", None, note="headless " + why, **_audit(cmd))
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
-            "permissionDecisionReason": f"jev-hooks: {why} from a headless worker (JEV_HOOKS_HEADLESS=1)."}}))
+        sys.stderr.write("jev-hooks: JEV_HOOKS_HEADLESS is deprecated; enforcer-governor's graph-worker rules own this. Install it.\n")
+        jev.emit_decision("Bash", "allow", "graph_land_allowed" if "land" in why else "graph_pr_allowed",
+                          f"jev-hooks: {why} from a headless worker (JEV_HOOKS_HEADLESS=1).", "jev.headless_pr")
         return
     m = outward_match(cmd)
     if m:
         jev.record("bash_gate", "ask", None, note="outward", **_audit(cmd))
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
-            "permissionDecisionReason": f"jev-hooks: `{m.group(1).strip()}` publishes, merges or deploys outside this "
-                                        "machine, where no local undo reaches it. Confirm the target."}}))
+        jev.emit_decision("Bash", "ask", "deploy_publish", f"jev-hooks: `{m.group(1).strip()}` publishes, merges or deploys outside this "
+                          "machine, where no local undo reaches it. Confirm the target.", "jev.outward")
         return
     m = discard_match(cmd)
     if m:
         jev.record("bash_gate", "ask", None, note="discard", **_audit(cmd))
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
-            "permissionDecisionReason": "jev-hooks: `git reset --hard` discards every uncommitted change in the work tree; "
-                                        "nothing restores them. Commit or stash first, or confirm."}}))
+        jev.emit_decision("Bash", "ask", "destructive_git", "jev-hooks: `git reset --hard` discards every uncommitted change in the work tree; "
+                          "nothing restores them. Commit or stash first, or confirm.", "jev.discard")
         return
     git = git_fact(work_dir(cmd, inp.get("cwd")))
     state = {"command": cmd, "description": ti.get("description") or "", "cwd": inp.get("cwd") or "", "git": git}
@@ -557,8 +559,7 @@ def main():
     if decision == "deny" and os.environ.get("JEV_HOOKS_GATE_MODE") == "warn":
         decision = "ask"
     jev.record("bash_gate", decision, a, git=git.split(":")[0], **_audit(cmd))
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
-                                              "permissionDecisionReason": "jev-hooks: " + "; ".join(reasons) + hint}}))
+    jev.emit_decision("Bash", decision, "custom_rule", "jev-hooks: " + "; ".join(reasons) + hint, "jev.judge")
 
 
 if __name__ == "__main__":
