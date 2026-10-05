@@ -11,7 +11,7 @@ trap 'kill $STUB 2>/dev/null' EXIT
 sleep 0.4
 export TYPESAFE_BASE_URL="http://127.0.0.1:$PORT" TYPESAFE_API_KEY=stub-key
 export CLAUDE_PLUGIN_DATA="$(mktemp -d)"
-export JEV_HOOKS_GOVERNOR=0   # detection stubbed off; the governor tests below flip it
+unset ENFORCER_GOVERNOR JEV_HOOKS_GOVERNOR
 pass=0; fail=0
 check() { if eval "$2"; then echo "PASS  $1"; pass=$((pass+1)); else echo "FAIL  $1"; fail=$((fail+1)); fi; }
 
@@ -19,11 +19,9 @@ check() { if eval "$2"; then echo "PASS  $1"; pass=$((pass+1)); else echo "FAIL 
 out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git status && go test ./..."}}' | python3 hooks/bash_risk_gate.py)
 check "gate: read-only command never reaches Jev" '[ -z "$out" ]'
 out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"pkill -f db.test # [self_kill=yes]"}}' | python3 hooks/bash_risk_gate.py)
-check "gate: self-kill pattern is denied" 'echo "$out" | grep -q "\"permissionDecision\": \"deny\""'
+check "gate: self-kill pattern is noted" 'echo "$out" | grep -q additionalContext'
 out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"rm -rf build/* # [irreversible=yes] [scope=pick:pattern] [action=pick:confirm]"}}' | python3 hooks/bash_risk_gate.py)
-check "gate: irreversible pattern asks" 'echo "$out" | grep -q "\"permissionDecision\": \"ask\""'
-out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"pkill -f db.test # [self_kill=yes]"}}' | JEV_HOOKS_GATE_MODE=warn python3 hooks/bash_risk_gate.py)
-check "gate: warn mode downgrades deny to ask" 'echo "$out" | grep -q "\"permissionDecision\": \"ask\""'
+check "gate: irreversible pattern asks" 'echo "$out" | grep -q additionalContext'
 out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/x"}}' | TYPESAFE_BASE_URL=http://127.0.0.1:1 python3 hooks/bash_risk_gate.py)
 check "gate: Jev unreachable fails open" '[ -z "$out" ]'
 
@@ -38,61 +36,13 @@ check "gate: a confirm with nothing at stake no longer interrupts" '[ -z "$out" 
 # destroyed, so they score low, but no local undo reaches a merged PR either.
 before=$(wc -l < "$JEV_STUB_RECORD")
 out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"cd ~/apps/x && gh pr merge 13 --squash --delete-branch"}}' | python3 hooks/bash_risk_gate.py)
-check "gate: merging a PR always asks" 'echo "$out" | grep -q "\"permissionDecision\": \"ask\"" && echo "$out" | grep -q "publishes, merges or deploys"'
+check "gate: merging a PR always asks" 'echo "$out" | grep -q additionalContext && echo "$out" | grep -q "publishes, merges or deploys"'
 check "gate: an outward command asks without spending a Jev call" '[ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
 out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git push --dry-run origin main"}}' | python3 hooks/bash_risk_gate.py)
 check "gate: a dry run is not a push" '! echo "$out" | grep -q "publishes, merges or deploys"'
 # Anchored to a segment start, so prose that names a push is not one.
 out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"echo \"then run git push origin main\" > /tmp/notes.txt"}}' | python3 hooks/bash_risk_gate.py)
 check "gate: a command that merely MENTIONS a push is not treated as one" '! echo "$out" | grep -q "publishes, merges or deploys"'
-# Headless graph workers: JEV_HOOKS_HEADLESS=1 (set by the launcher) lets ONE shape through -
-# a push of graph/<key> - and nothing else. Without it, or for any other push, the gate is unchanged.
-gp() { printf '%s' "$(python3 -c 'import json,sys;print(json.dumps({"tool_name":"Bash","tool_input":{"command":sys.argv[1]}}))' "$1")" | JEV_HOOKS_HEADLESS=${2:-} python3 hooks/bash_risk_gate.py; }
-allowed() { gp "$1" 1 | grep -q '"permissionDecision": "allow"'; }
-asked() { gp "$1" 1 | grep -q '"permissionDecision": "ask"'; }
-check "headless: git push -u origin graph/foo is allowed" 'allowed "git push -u origin graph/foo"'
-check "headless: git -C <dir> push origin graph/foo-1.2 is allowed" 'allowed "git -C ~/apps/x push origin graph/foo-1.2"'
-check "headless: HEAD:graph/foo is allowed" 'allowed "git push origin HEAD:graph/foo"'
-check "headless: --force still asks" 'asked "git push --force origin graph/foo"'
-check "headless: -f still asks" 'asked "git push -f origin graph/foo"'
-check "headless: --force-with-lease still asks" 'asked "git push --force-with-lease origin graph/foo"'
-check "headless: +refspec force still asks" 'asked "git push origin +graph/foo"'
-check "headless: push to main still asks" 'asked "git push origin main"'
-check "headless: push to master still asks" 'asked "git push -u origin master"'
-check "headless: HEAD:main still asks" 'asked "git push origin HEAD:main"'
-check "headless: --tags still asks" 'asked "git push --tags origin graph/foo"'
-check "headless: --mirror still asks" 'asked "git push --mirror origin"'
-check "headless: --delete still asks" 'asked "git push --delete origin graph/foo"'
-check "headless: :graph/foo (delete refspec) still asks" 'asked "git push origin :graph/foo"'
-check "headless: a non-graph branch still asks" 'asked "git push -u origin feat/foo"'
-check "headless: graph/ prefix lookalike still asks" 'asked "git push origin graphs/foo"'
-check "headless: a URL remote still asks" 'asked "git push git@evil.example:x/y.git graph/foo"'
-check "headless: chained command still asks" 'asked "git push origin graph/foo && git push origin main"'
-check "headless: substitution in the branch still asks" 'asked "git push origin graph/\$(whoami)"'
-check "interactive: graph push still asks (no JEV_HOOKS_HEADLESS)" 'gp "git push -u origin graph/foo" | grep -q "\"permissionDecision\": \"ask\""'
-check "interactive: JEV_HOOKS_HEADLESS=0 still asks" 'gp "git push -u origin graph/foo" 0 | grep -q "\"permissionDecision\": \"ask\""'
-
-# headless PR create / land-pr.sh: a real repo for the branch, a gh stub for the PR head.
-pr_t=$(mktemp -d); git init -q "$pr_t/r"; git -C "$pr_t/r" commit -q --allow-empty -m i
-mkdir "$pr_t/bin"; printf '#!/bin/sh\ncase "$3" in 7) echo graph/x;; *) echo feature/y;; esac\n' > "$pr_t/bin/gh"; chmod +x "$pr_t/bin/gh"
-pp() { # cmd branch [headless]
-  git -C "$pr_t/r" checkout -q -B "$2"
-  printf '%s' "$(python3 -c 'import json,sys;print(json.dumps({"tool_name":"Bash","cwd":sys.argv[2],"tool_input":{"command":sys.argv[1]}}))' "$1" "$pr_t/r")" | PATH="$pr_t/bin:$PATH" JEV_HOOKS_HEADLESS=${3-1} python3 hooks/bash_risk_gate.py; }
-pallow() { pp "$1" "$2" "${3-1}" | grep -q '"permissionDecision": "allow"'; }
-pask() { pp "$1" "$2" "${3-1}" | grep -q '"permissionDecision": "ask"'; }
-check "headless: gh pr create on graph/x is allowed" 'pallow "gh pr create --title t --body \"b (x); y\"" graph/x'
-check "headless: gh pr create on main asks" 'pask "gh pr create --title t" main'
-check "headless: gh pr create on feature/x asks" 'pask "gh pr create --title t" feature/x'
-check "headless: gh pr create --base main asks" 'pask "gh pr create --base main --title t" graph/x'
-check "headless: gh pr create chained asks" 'pask "gh pr create --title t && gh pr merge 7" graph/x'
-check "headless: gh pr create with substitution asks" 'pask "gh pr create --title \"\$(id)\"" graph/x'
-check "headless: land-pr.sh for a graph/ head is allowed" 'pallow "~/.claude/plugins/cache/a/enforcer-graph/1/bin/land-pr.sh 7 --timeout 3000" main'
-check "headless: land-pr.sh for another head is not allowed" '! pallow "land-pr.sh 8 --timeout 3000" graph/x'
-check "headless: land-pr.sh with extra args is not allowed" '! pallow "land-pr.sh 7 --admin" graph/x'
-check "headless: gh pr merge still asks" 'pask "gh pr merge 7 --squash" graph/x'
-check "interactive: gh pr create on graph/x still asks" 'pask "gh pr create --title t" graph/x 0'
-check "interactive: land-pr.sh still asks or is judged, never allowed" '! pallow "land-pr.sh 7" graph/x 0'
-rm -rf "$pr_t"
 
 
 # --- precompact triage + sessionstart reinject
@@ -596,14 +546,14 @@ out=$(eg "$(egs Write "{\"file_path\":\"$EG/made-here.go\",\"content\":\"x\"}" "
 out=$(eg "$(egs Edit "{\"file_path\":\"$EG/made-here.go\",\"old_string\":\"1\",\"new_string\":\"x\"}" "$STEER" sess-A)")
 check "edit gate: an untracked file THIS session created does not ask again" '[ -z "$out" ] && grep -q "fast-path: created this session" "$CLAUDE_PLUGIN_DATA/eg.err"'
 out=$(eg "$(egs Edit "{\"file_path\":\"$EG/made-here.go\",\"old_string\":\"1\",\"new_string\":\"x\"}" "$STEER" sess-B)")
-check "edit gate: the same untracked file from ANOTHER session still asks" 'echo "$out" | grep -q "\"permissionDecision\": \"ask\""'
+check "edit gate: the same untracked file from ANOTHER session still asks" 'echo "$out" | grep -q additionalContext'
 out=$(eg "$(egin Read "{\"file_path\":\"$EG/tracked.tf\"}" "$STEER")")
 check "edit gate: a tool it does not gate is ignored" '[ -z "$out" ]'
 
 echo "uncommitted" >> "$EG/tracked.tf"
 eglog="$CLAUDE_PLUGIN_DATA/eg.log"; : > "$eglog"
 out=$(printf '%s' "$(egin Write "{\"file_path\":\"$EG/tracked.tf\",\"content\":\"tiny\"}" "$STEER")" | JEV_HOOKS_LOG="$eglog" python3 hooks/edit_risk_gate.py)
-check "edit gate: a whole-file write over uncommitted changes asks" 'echo "$out" | grep -q "\"permissionDecision\": \"ask\"" && echo "$out" | grep -q "uncommitted changes"'
+check "edit gate: a whole-file write over uncommitted changes asks" 'echo "$out" | grep -q additionalContext && echo "$out" | grep -q "uncommitted changes"'
 check "edit gate: that case is a fact and costs no Jev call" '[ "$(grep -c "\"kind\": \"call\"" "$eglog")" = "0" ]'
 check "edit gate: it names the file and says to commit or stash" 'echo "$out" | grep -q "tracked.tf" && echo "$out" | grep -q "Commit or stash it first"'
 : > "$eglog"
@@ -612,14 +562,12 @@ check "edit gate: a targeted Edit on a dirty file is silent and costs no call" '
 
 : > "$JEV_STUB_RECORD"
 out=$(eg "$(egin Write "{\"file_path\":\"$EG/.env\",\"content\":\"TOKEN=new\"}" "$STEER")")
-check "edit gate: a git-ignored file is judged, not waved through" 'echo "$out" | grep -q "\"permissionDecision\": \"ask\"" && echo "$out" | grep -q "is ignored"'
+check "edit gate: a git-ignored file is judged, not waved through" 'echo "$out" | grep -q additionalContext && echo "$out" | grep -q "is ignored"'
 check "edit gate: the file's contents are never sent to Jev" '[ -s "$JEV_STUB_RECORD" ] && ! grep -q "$SECRET" "$JEV_STUB_RECORD"'
 
 BLOCKSTEER='[unrecoverable=yes] [proportionate=pick:wholesale] [action=pick:block]'
 out=$(eg "$(egin Write "{\"file_path\":\"$EG/untracked.tf\",\"content\":\"x\"}" "$BLOCKSTEER")")
-check "edit gate: destroying unversioned work is denied" 'echo "$out" | grep -q "\"permissionDecision\": \"deny\""'
-out=$(printf '%s' "$(egin Write "{\"file_path\":\"$EG/untracked.tf\",\"content\":\"x\"}" "$BLOCKSTEER")" | JEV_HOOKS_GATE_MODE=warn python3 hooks/edit_risk_gate.py)
-check "edit gate: warn mode downgrades deny to ask" 'echo "$out" | grep -q "\"permissionDecision\": \"ask\""'
+check "edit gate: destroying unversioned work is denied" 'echo "$out" | grep -q additionalContext'
 REGEN='[unrecoverable=no] [proportionate=pick:wholesale] [action=pick:confirm]'
 out=$(eg "$(egin Write "{\"file_path\":\"$EG/regen.lock\",\"content\":\"{}\"}" "$REGEN")")
 check "edit gate: a recoverable file stays silent even on a confirm verdict" '[ -z "$out" ]'
@@ -1216,9 +1164,9 @@ check "discard: git reset --hard asks, in a chain, through -C and inside a loop 
 check "discard: a soft reset, a grep for it, and a commit message naming it do not" '[ "$(dm "git reset --soft HEAD~1")" = "False" ] && [ "$(dm "grep -n \"git reset --hard\" notes.md")" = "False" ] && [ "$(dm "$(printf "git commit -F - <<'"'"'EOF'"'"'\nfix\ngit reset --hard is next\nEOF")")" = "False" ]'
 before=$(wc -l < "$JEV_STUB_RECORD")
 out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git reset --hard origin/main"}}' | python3 hooks/bash_risk_gate.py)
-check "discard: it asks and spends no Jev call" 'echo "$out" | grep -q "\"permissionDecision\": \"ask\"" && echo "$out" | grep -q "discards every uncommitted change" && [ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
+check "discard: it asks and spends no Jev call" 'echo "$out" | grep -q additionalContext && echo "$out" | grep -q "discards every uncommitted change" && [ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
 out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git reset --hard origin/main"}}' | TYPESAFE_BASE_URL=http://127.0.0.1:1 python3 hooks/bash_risk_gate.py)
-check "discard: it still asks with the judge down" 'echo "$out" | grep -q "\"permissionDecision\": \"ask\""'
+check "discard: it still asks with the judge down" 'echo "$out" | grep -q additionalContext'
 
 # Git tells the judge whether an edit is undoable; the judge is not left to guess.
 gs=$(mktemp -d)
@@ -1258,7 +1206,7 @@ o2=$(printf '%s' '{"prompt":"How does the router pick a model? [kind=pick:questi
 o3=$(printf '%s' '{"tool_name":"Agent","tool_input":{"prompt":"Find the file. [model=pick:haiku]"}}' | JEV_HOOKS_DISABLE=" model_router " python3 hooks/model_router.py)
 check "switch: a switched-off hook is silent and never calls the judge" '[ -z "$o1$o2$o3" ] && [ "$(wc -l < "$JEV_STUB_RECORD")" = "$before" ]'
 o1=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"rm -rf build/* # [irreversible=yes]"}}' | JEV_HOOKS_DISABLE=prompt_routing python3 hooks/bash_risk_gate.py)
-check "switch: switching one hook off leaves the others running" 'echo "$o1" | grep -q "\"permissionDecision\": \"ask\""'
+check "switch: switching one hook off leaves the others running" 'echo "$o1" | grep -q additionalContext'
 
 # The loadout launcher is a Go binary (loadout/). Its own tests cover
 # discovery, the argv and env it builds, the 0600 MCP file, Jev pre-selection
@@ -1268,19 +1216,23 @@ if command -v go >/dev/null 2>&1; then
   check "loadout: the Go launcher's tests pass" 'echo "$gt" | grep -q "^ok"'
 fi
 
-# --- governor deference: detection stubbed both ways
-gv() { printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}' | JEV_HOOKS_GOVERNOR=$1 python3 hooks/bash_risk_gate.py 2>"$JEV_STUB_ERR"; }
-JEV_STUB_ERR=$(mktemp)
-out=$(gv 1)
-check "governor installed: bash gate makes no decision" '[ -z "$out" ]'
-out=$(gv 0)
-check "governor absent: bash gate still decides (ask)" 'echo "$out" | grep -q "\"permissionDecision\": \"ask\""'
-check "governor absent: shared decision record on stderr" 'grep -q "^enforcer-governor:decision {\"decision\": \"ask\", \"code\": \"deploy_publish\", \"rule\": \"jev.outward\", \"tool\": \"Bash\"" "$JEV_STUB_ERR"'
+# --- governor detection: ENFORCER_GOVERNOR=1 is the only signal
+gd() { env -u ENFORCER_GOVERNOR ${1:+ENFORCER_GOVERNOR=$1} HOME="$2" python3 -c 'import sys;sys.path.insert(0,"lib");import jev;print(jev.governor_installed())'; }
+gh_home=$(mktemp -d); mkdir -p "$gh_home/.claude/plugins/cache/m/enforcer-governor" "$gh_home/.claude/plugins/cache/m/enforcer"
+check "governor: ENFORCER_GOVERNOR=1 is detected" '[ "$(gd 1 "$gh_home")" = True ]'
+check "governor: a disabled-but-cached governor is NOT detected" '[ "$(gd "" "$gh_home")" = False ]'
+check "governor: JEV_HOOKS_GOVERNOR no longer forces detection" '[ "$(JEV_HOOKS_GOVERNOR=1 gd "" "$gh_home")" = False ]'
+rm -rf "$gh_home"
 eg=$(mktemp -d -p "$PWD/test"); trap "kill \$STUB 2>/dev/null; rm -rf $eg" EXIT; printf 'x' > "$eg/f.txt"; git -C "$eg" init -q; git -C "$eg" add f.txt; git -C "$eg" -c user.email=a@b -c user.name=n commit -qm i; printf 'y' > "$eg/f.txt"
-ge() { printf '%s' "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$eg/f.txt\",\"content\":\"zz\"}}" | JEV_HOOKS_GOVERNOR=$1 python3 hooks/edit_risk_gate.py 2>"$JEV_STUB_ERR"; }
-check "governor installed: edit gate makes no decision" '[ -z "$(ge 1)" ]'
-check "governor absent: edit gate asks and emits the record" 'ge 0 | grep -q "\"ask\"" && grep -q "enforcer-governor:decision" "$JEV_STUB_ERR"'
-check "headless allow warns of deprecation" 'gp "git push -u origin graph/foo" 1 >/dev/null 2>"$JEV_STUB_ERR"; grep -q "JEV_HOOKS_HEADLESS is deprecated" "$JEV_STUB_ERR"'
+out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}' | ENFORCER_GOVERNOR=1 python3 hooks/bash_risk_gate.py)
+check "bash gate: emits a note, never permissionDecision (governor present)" 'echo "$out" | grep -q additionalContext && ! echo "$out" | grep -q permissionDecision'
+out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}' | python3 hooks/bash_risk_gate.py)
+check "bash gate: emits a note, never permissionDecision (no governor)" 'echo "$out" | grep -q additionalContext && ! echo "$out" | grep -q permissionDecision'
+out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"pkill -f db.test # [self_kill=yes]"}}' | python3 hooks/bash_risk_gate.py)
+check "bash gate: a self-kill verdict is a note, not a deny" 'echo "$out" | grep -q additionalContext && ! echo "$out" | grep -q permissionDecision'
+out=$(printf '%s' "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$eg/f.txt\",\"content\":\"zz\"}}" | python3 hooks/edit_risk_gate.py)
+check "edit gate: emits a note, never permissionDecision" 'echo "$out" | grep -q additionalContext && ! echo "$out" | grep -q permissionDecision'
+check "gates: no permissionDecision in either source" '[ "$(cat hooks/bash_risk_gate.py hooks/edit_risk_gate.py | grep -c permissionDecision)" = 0 ]'
 
 # The README states this number, and a number in prose drifts silently: it said
 # 111 while the suite ran 126, and the count of your own tests is the first

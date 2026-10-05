@@ -150,23 +150,9 @@ hundreds of calls earlier into view, so a block on it stands — re-verifying wa
 one query. Dropping loop_detect's `counting` records was also wrong: each is a
 paid judgment with a score, not bookkeeping.
 
-### Governor deference (0.27.0)
+### Quality only (1.0.0)
 
-When `enforcer-governor` is installed (detected by `ENFORCER_GOVERNOR=1` from its SessionStart hook, or its directory in the plugin cache; `JEV_HOOKS_GOVERNOR=1|0` forces it) `bash_risk_gate` and `edit_risk_gate` make **no allow/deny/ask decision**: policy belongs to the governor, and jev-hooks keeps the quality hooks (narrow_output, loop_detect, precompact_triage, stop_selfcheck, subagent_verify, model_router, prompt_routing). Without the governor the gates decide as before, so a machine without it is not left ungated, and each decision also writes the governor's record (`enforcer-governor:decision {decision, code, rule, tool, summary}`) to stderr so consumers parse one format.
-
-**`JEV_HOOKS_HEADLESS` is deprecated.** The governor's graph-worker rules own headless `graph/<key>` push, `gh pr create` and `land-pr.sh`. The variable is still read for one release, with a deprecation line on stderr, and will then be removed.
-
-### Headless workers: pushing a `graph/<key>` branch (deprecated)
-
-`git push` always asks (outward). A headless worker (`claude -p`, `bin/graph-dispatch`) has no one to
-answer, so the ask is a denial and a finished node cannot be pushed. The hook cannot tell a session has
-no approval surface: its stdin carries `permission_mode`, identical for `claude -p` and an interactive
-session, and nothing else says "headless". So the signal is explicit: the launcher sets
-`JEV_HOOKS_HEADLESS=1`, and only then is exactly one shape allowed: `git [-C dir] push [-u] <remote>
-graph/<key>` (or `HEAD:graph/<key>`) as the whole command. Force (flag or `+refspec`), `--tags`,
-`--mirror`, `--delete`, `:ref`, `main`/`master`, any non-`graph/` branch, a URL remote and any chaining
-or substitution keep today's ask. Interactive sessions never set the variable.
-Since 0.26.0 two more shapes pass under the same variable: `gh pr create` (only `--title/--body/--body-file/--fill/--draft`, no `--base`/`--head`) while the current branch is `graph/<key>`, and `[path/]land-pr.sh <pr> [--timeout N]` when that PR's head is `graph/<key>`. `gh pr merge` and everything else still ask.
+jev-hooks 1.0.0 depends on `enforcer`, whose governor owns every allow/deny/ask decision. `bash_risk_gate` and `edit_risk_gate` keep their Jev judgment but only emit a risk NOTE as `additionalContext`; they never emit `permissionDecision`. `JEV_HOOKS_GATE_MODE`, `JEV_HOOKS_GOVERNOR` and `JEV_HOOKS_HEADLESS` are gone. The governor is detected only by `ENFORCER_GOVERNOR=1`, set by its SessionStart hook; a plugin-cache directory proves nothing, because a disabled governor still has one.
 
 ### Tuning the Bash gate on a mixed log
 
@@ -566,7 +552,7 @@ their terms before enabling this on a repository whose prompts are sensitive.
 ## Test
 
 ```bash
-bash test/run.sh      # 293 checks against a local stub; no key, no network
+bash test/run.sh      # 260 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),

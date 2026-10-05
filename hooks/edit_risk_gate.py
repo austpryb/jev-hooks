@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreToolUse hook (matcher: Edit|Write|NotebookEdit|MultiEdit). allow / ask / deny.
+"""PreToolUse hook (matcher: Edit|Write|NotebookEdit|MultiEdit). risk NOTES only, never a permission decision.
 
 The Bash gate reads a command; this reads a file change. Deterministic first,
 and here the deterministic part does nearly all of the work, because git
@@ -29,9 +29,7 @@ no output, and the normal permission flow decides as if the hook were absent.
 
 Output when it has an opinion (PreToolUse JSON contract):
   {"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                          "permissionDecision": "deny"|"ask",
-                          "permissionDecisionReason": "..."}}
-JEV_HOOKS_GATE_MODE=warn downgrades every deny to ask.
+                          "additionalContext": "NOTE (Write): ..."}}
 """
 import json, os, subprocess, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
@@ -134,9 +132,6 @@ def main():
     tool = inp.get("tool_name")
     if tool not in TOOLS:
         return
-    if jev.governor_installed():
-        jev.record("edit_gate", "deferred", None, note="enforcer-governor decides")
-        return                       # policy belongs to the governor
     path, removing, adding = change(tool, inp.get("tool_input") or {})
     if not path:
         return
@@ -167,8 +162,8 @@ def main():
         # Deciding it here is cheaper, never flaps, and leaves Jev the question it is
         # actually good at: whether an unversioned file is precious or regenerable.
         jev.record("edit_gate", "ask", None, path=ap, git_state=state, note="deterministic: whole-file write over uncommitted changes")
-        jev.emit_decision(tool, "ask", "custom_rule", f"jev-hooks: {tool} replaces the whole of {os.path.basename(ap)}, which has "
-                          "uncommitted changes — git cannot restore them. Commit or stash it first.", "jev.whole_file_write")
+        jev.emit_note(tool, f"jev-hooks: {tool} replaces the whole of {os.path.basename(ap)}, which has "
+                          "uncommitted changes — git cannot restore them. Commit or stash it first.")
         return
     if state == "modified":
         # Anything short of a whole-file write leaves the committed base in place and
@@ -224,8 +219,6 @@ def main():
     if not decision:
         jev.record("edit_gate", "silent", a, path=ap, git_state=state)
         return
-    if decision == "deny" and os.environ.get("JEV_HOOKS_GATE_MODE") == "warn":
-        decision = "ask"
     reason = (f"{tool} on a file that is {state}: unrecoverable p={unrec:.2f}, {prop}, "
               f"replacing {removing}B with {adding}B")
     # An ignored or untracked file cannot be committed, so do not tell anyone to.
@@ -234,7 +227,7 @@ def main():
         hint = (" Commit or stash it first, or read the file before overwriting." if state == "modified"
                 else " Nothing in git holds this — copy it aside before overwriting.")
     jev.record("edit_gate", decision, a, path=ap, git_state=state)
-    jev.emit_decision(tool, decision, "custom_rule", "jev-hooks: " + reason + hint, "jev.judge")
+    jev.emit_note(tool, "jev-hooks: " + reason + hint)
 
 
 if __name__ == "__main__":

@@ -66,6 +66,6 @@ this file.
   sent, and says TypeSafe stores inputs by default with no stated retention
   period. That should stay at least as specific as it is now. If ZDR is ever
   agreed, update it rather than deleting the caveat.
-- **Governor split (0.27.0).** With enforcer-governor installed, jev-hooks makes
-  no allow/deny decisions; policy is the governor's, quality hooks stay here.
+- **Governor split (1.0.0).** jev-hooks depends on enforcer and makes no
+  allow/deny decisions at all; policy is the governor's, quality hooks stay here.
   Keep that line when describing either plugin.
