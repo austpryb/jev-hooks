@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""PreToolUse hook (matcher: Bash). One Jev call decides allow / ask / deny.
+"""PreToolUse hook (matcher: Bash). One Jev call writes a risk NOTE.
 
 Deterministic first: a command that is plainly read-only never reaches Jev.
 Then one request with four independent questions over {command, description, cwd}.
-Fails open: no key, timeout, 429/529 -> exit 0 with no output, so the normal
-permission flow decides exactly as it would without this hook.
+Quality-only: it never allows, asks or denies; that is the governor's (enforcer).
+Fails open: no key, timeout, 429/529 -> exit 0 with no output.
 
 Output when it has an opinion (PreToolUse JSON contract):
   {"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                          "permissionDecision": "deny"|"ask",
-                          "permissionDecisionReason": "..."}}
-JEV_HOOKS_GATE_MODE=warn downgrades every deny to ask.
+                          "additionalContext": "NOTE (Bash): ..."}}
 """
 import json, os, re, shlex, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
@@ -507,9 +505,6 @@ def main():
     inp = jev.read_stdin()
     if inp.get("tool_name") != "Bash":
         return
-    if jev.governor_installed():
-        jev.record("bash_gate", "deferred", None, note="enforcer-governor decides")
-        return                       # policy belongs to the governor
     ti = inp.get("tool_input") or {}
     cmd = ti.get("command") or ""
     if not cmd.strip():
@@ -522,29 +517,17 @@ def main():
         # from transcripts.
         jev.record("bash_gate", "read-only", None, command=cmd[:200], len=len(cmd))
         return
-    if headless_graph_push(cmd):
-        jev.record("bash_gate", "allow", None, note="headless graph push", **_audit(cmd))
-        sys.stderr.write("jev-hooks: JEV_HOOKS_HEADLESS is deprecated; enforcer-governor's graph-worker rules own this. Install it.\n")
-        jev.emit_decision("Bash", "allow", "graph_push_allowed", "jev-hooks: push of a graph/<key> branch from a headless worker (JEV_HOOKS_HEADLESS=1).", "jev.headless_push")
-        return
-    why = headless_graph_pr(cmd, inp.get("cwd"))
-    if why:
-        jev.record("bash_gate", "allow", None, note="headless " + why, **_audit(cmd))
-        sys.stderr.write("jev-hooks: JEV_HOOKS_HEADLESS is deprecated; enforcer-governor's graph-worker rules own this. Install it.\n")
-        jev.emit_decision("Bash", "allow", "graph_land_allowed" if "land" in why else "graph_pr_allowed",
-                          f"jev-hooks: {why} from a headless worker (JEV_HOOKS_HEADLESS=1).", "jev.headless_pr")
-        return
     m = outward_match(cmd)
     if m:
         jev.record("bash_gate", "ask", None, note="outward", **_audit(cmd))
-        jev.emit_decision("Bash", "ask", "deploy_publish", f"jev-hooks: `{m.group(1).strip()}` publishes, merges or deploys outside this "
-                          "machine, where no local undo reaches it. Confirm the target.", "jev.outward")
+        jev.emit_note("Bash", f"jev-hooks: `{m.group(1).strip()}` publishes, merges or deploys outside this "
+                          "machine, where no local undo reaches it. Confirm the target.")
         return
     m = discard_match(cmd)
     if m:
         jev.record("bash_gate", "ask", None, note="discard", **_audit(cmd))
-        jev.emit_decision("Bash", "ask", "destructive_git", "jev-hooks: `git reset --hard` discards every uncommitted change in the work tree; "
-                          "nothing restores them. Commit or stash first, or confirm.", "jev.discard")
+        jev.emit_note("Bash", "jev-hooks: `git reset --hard` discards every uncommitted change in the work tree; "
+                          "nothing restores them. Commit or stash first, or confirm.")
         return
     git = git_fact(work_dir(cmd, inp.get("cwd")))
     state = {"command": cmd, "description": ti.get("description") or "", "cwd": inp.get("cwd") or "", "git": git}
@@ -556,10 +539,8 @@ def main():
     if not decision:
         jev.record("bash_gate", "silent", a, git=git.split(":")[0], **_audit(cmd))
         return
-    if decision == "deny" and os.environ.get("JEV_HOOKS_GATE_MODE") == "warn":
-        decision = "ask"
     jev.record("bash_gate", decision, a, git=git.split(":")[0], **_audit(cmd))
-    jev.emit_decision("Bash", decision, "custom_rule", "jev-hooks: " + "; ".join(reasons) + hint, "jev.judge")
+    jev.emit_note("Bash", "jev-hooks: " + "; ".join(reasons) + hint)
 
 
 if __name__ == "__main__":

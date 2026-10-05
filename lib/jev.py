@@ -227,28 +227,17 @@ def read_stdin():
     return v if isinstance(v, dict) else {}
 
 
-# --- governor deference -------------------------------------------------------
-# When enforcer-governor is installed it owns allow/deny/ask for Bash and edits;
-# jev-hooks keeps only quality hooks. Without it the gates decide as before.
+# --- governor detection -------------------------------------------------------
+# The governor (inside `enforcer`) owns every allow/deny/ask. jev-hooks only adds
+# risk NOTES. The governor's SessionStart hook sets ENFORCER_GOVERNOR=1; that env
+# var is the ONLY signal. A plugin-cache directory proves nothing: a disabled
+# governor still has one (2026-10-05).
 def governor_installed():
-    """JEV_HOOKS_GOVERNOR=1/0 forces the answer (tests); else the governor's
-    SessionStart env (ENFORCER_GOVERNOR=1) or a plugin-cache directory."""
-    f = os.environ.get("JEV_HOOKS_GOVERNOR")
-    if f in ("0", "1"):
-        return f == "1"
-    if os.environ.get("ENFORCER_GOVERNOR") == "1":
-        return True
-    import glob
-    return bool(glob.glob(os.path.expanduser("~/.claude/plugins/cache/*/enforcer-governor")))
+    return os.environ.get("ENFORCER_GOVERNOR") == "1"
 
 
-DECISION_PREFIX = "enforcer-governor:decision "
-
-
-def emit_decision(tool, decision, code, reason, rule=None):
-    """Print the hook permission answer and write the governor's decision record
-    (decision, code, rule, tool, summary) as one stderr line a parent can parse."""
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
-                                              "permissionDecisionReason": reason}}))
-    rec = {"decision": decision, "code": code, "rule": rule, "tool": tool, "summary": reason}
-    sys.stderr.write(DECISION_PREFIX + json.dumps(rec) + "\n")
+def emit_note(tool, reason):
+    """Quality-only: hand the model a risk note as additionalContext. Never a
+    permission decision; the governor decides."""
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                              "additionalContext": "NOTE (" + tool + "): " + reason}}))
