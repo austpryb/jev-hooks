@@ -1,8 +1,15 @@
-# Before this repository is made public
+# Publication and licence
 
-**Status: DRAFT, unreviewed. Written by an agent from a reading of TypeSafe's
-Master Customer Agreement taken on 2026-09-19. It is not legal advice and no
-lawyer has seen it. Nothing here authorises publication.**
+**Status: published by the owner on 2026-10-08 under the MIT licence (see
+`LICENSE`). The analysis below was drafted by an agent from a reading of
+TypeSafe's Master Customer Agreement taken on 2026-09-19. It is not legal
+advice and no lawyer has reviewed it. The owner chose to publish with the CLI
+and skill included; the TypeSafe question below is still open, and the
+checklist is kept so it is not forgotten.**
+
+This repository is maintained by its author, separately from the Enforcer
+platform. Every user supplies their own `TYPESAFE_API_KEY` and is bound by their
+own agreement with TypeSafe.
 
 This plugin has no value without TypeSafe's Jev API. Publishing it therefore
 asks a question we have not answered in writing: does distributing a client
@@ -41,7 +48,7 @@ straightforwardly fine, and it is how most API client libraries exist.
 Which reading governs is a question for a person, not for the agent that wrote
 this file.
 
-## What a human needs to decide or confirm
+## Still open (nothing here has been answered)
 
 - [ ] Is the TypeSafe account the company's, or an individual's? (Open since
       2026-09-19.)
