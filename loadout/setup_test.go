@@ -137,7 +137,7 @@ func TestShellBlockIsIdempotent(t *testing.T) {
 
 func TestMarketplaceName(t *testing.T) {
 	for repo, want := range map[string]string{
-		"instruxi-io/claude-plugins": "instruxi", "acme/team-plugins": "team-plugins",
+		"instruxi-io/agent-plugins": "instruxi", "instruxi-io/claude-plugins": "instruxi", "acme/team-plugins": "team-plugins",
 		"acme/team-plugins.git": "team-plugins"} {
 		if got := marketplaceName(repo); got != want {
 			t.Errorf("%s -> %s, want %s", repo, got, want)

@@ -201,8 +201,10 @@ func confirm(q string) bool {
 func marketplaceName(repo string) string {
 	parts := strings.Split(strings.TrimSuffix(repo, ".git"), "/")
 	last := parts[len(parts)-1]
-	if last == "claude-plugins" && len(parts) > 1 {
-		return "instruxi" // this catalog names itself
+	// The Instruxi catalog names itself; it was claude-plugins until it was
+	// renamed agent-plugins, and a kit or a flag may still use either.
+	if (last == "agent-plugins" || last == "claude-plugins") && len(parts) > 1 {
+		return "instruxi"
 	}
 	return last
 }
