@@ -10,7 +10,7 @@ import (
 )
 
 // DefaultKitRepo is the marketplace that carries the kit definition.
-const DefaultKitRepo = "instruxi-io/claude-plugins"
+const DefaultKitRepo = "instruxi-io/agent-plugins"
 
 // Kit is kit.json from the marketplace repo: which plugins a new developer
 // gets, what each person supplies themselves, and the MCP servers no plugin
