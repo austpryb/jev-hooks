@@ -150,6 +150,10 @@ hundreds of calls earlier into view, so a block on it stands — re-verifying wa
 one query. Dropping loop_detect's `counting` records was also wrong: each is a
 paid judgment with a score, not bookkeeping.
 
+### 1.0.1
+
+The Stop check's block quotes the sentence it objected to. It picked that sentence by splitting on ". ", so in a numbered list the item number became its own "sentence" and the `unverified` block quoted `"4."` as the unsupported claim (2026-10-23) - right verdict, nonsense quote, and a block that reads as broken is one that gets ignored. List markers are now glued back onto their item and never quoted alone. Also: the decision log is rotated to `decisions.jsonl.1` when it reaches 64 MB (`JEV_HOOKS_LOG_MAX_BYTES`); it had grown to 60 MB in three weeks with nothing trimming it.
+
 ### Quality only (1.0.0)
 
 jev-hooks 1.0.0 depends on `enforcer`, whose governor owns every allow/deny/ask decision. `bash_risk_gate` and `edit_risk_gate` keep their Jev judgment but only emit a risk NOTE as `additionalContext`; they never emit `permissionDecision`. `JEV_HOOKS_GATE_MODE`, `JEV_HOOKS_GOVERNOR` and `JEV_HOOKS_HEADLESS` are gone. The governor is detected only by `ENFORCER_GOVERNOR=1`, set by its SessionStart hook; a plugin-cache directory proves nothing, because a disabled governor still has one.
@@ -489,7 +493,8 @@ From a checkout instead: `cd loadout && go build -o ~/.local/bin/claude-loadout 
 
 Every hook records its own verdict next to what the call cost, to
 `${CLAUDE_PLUGIN_DATA}/decisions.jsonl` (or `JEV_HOOKS_LOG`; `off` disables
-it). Local only, nothing leaves the machine. It is **on by default** on
+it). Local only, nothing leaves the machine; at 64 MB (`JEV_HOOKS_LOG_MAX_BYTES`)
+the file moves to `decisions.jsonl.1` and a new one starts. It is **on by default** on
 purpose: a feedback loop that needs an env var set is one that never happens,
 and without a record there is no way to measure a false positive rate — every
 threshold then moves on whoever complains loudest.
@@ -552,7 +557,7 @@ their terms before enabling this on a repository whose prompts are sensitive.
 ## Test
 
 ```bash
-bash test/run.sh      # 260 checks against a local stub; no key, no network
+bash test/run.sh      # 262 checks against a local stub; no key, no network
 ```
 
 The stub answers from markers in the request (`[qid=yes]`, `[qid=pick:block]`),
