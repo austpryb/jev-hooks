@@ -136,6 +136,15 @@ stopin() { python3 -c "import json,sys;print(json.dumps({'transcript_path':sys.a
 out=$(stopin "Build is green. I'll open the PR next. [promise=yes] [unanswered=no] [unverified=no]" 0 | python3 hooks/stop_selfcheck.py)
 check "stop: a promise of undone work blocks" 'echo "$out" | grep -q "\"decision\": \"block\"" && echo "$out" | grep -q "promises work not yet done"'
 check "stop: reason quotes the offending sentence" 'echo "$out" | grep -q "open the PR next"'
+# A markdown list number is not a sentence. Split on ". " alone, "2." was the last
+# fragment with a digit and got quoted as the unsupported claim (2026-10-23).
+out=$(stopin "All 212 tests pass. Next: 1. Merge it. 2. Tag it. [promise=no] [unanswered=no] [unverified=yes]" 0 | python3 hooks/stop_selfcheck.py)
+check "stop: the quote is the claim, not a list marker" 'echo "$out" | grep -q "All 212 tests pass" && ! echo "$out" | grep -q "\"2\.\""'
+# The decision log is rotated to .1 once it reaches its cap, before the write.
+rl="$(mktemp)"; head -c 300 /dev/zero | tr '\0' x > "$rl"
+stopin "I'll do it next. [promise=yes]" 0 | JEV_HOOKS_LOG="$rl" JEV_HOOKS_LOG_MAX_BYTES=200 python3 hooks/stop_selfcheck.py >/dev/null
+check "log: a decision log at its cap is moved to .1 and restarted" '[ "$(wc -c < "$rl.1")" -eq 300 ] && [ -s "$rl" ] && ! grep -q xxxxxxxx "$rl"'
+rm -f "$rl" "$rl.1"
 out=$(stopin "The build compiles. [promise=no] [unanswered=yes] [unverified=no]" 0 | python3 hooks/stop_selfcheck.py)
 check "stop: an unanswered question blocks" 'echo "$out" | grep -q "does not answer what the user last asked"'
 out=$(stopin "All 212 integration tests pass. [promise=no] [unanswered=no] [unverified=yes]" 0 | python3 hooks/stop_selfcheck.py)
@@ -1223,7 +1232,10 @@ check "governor: ENFORCER_GOVERNOR=1 is detected" '[ "$(gd 1 "$gh_home")" = True
 check "governor: a disabled-but-cached governor is NOT detected" '[ "$(gd "" "$gh_home")" = False ]'
 check "governor: JEV_HOOKS_GOVERNOR no longer forces detection" '[ "$(JEV_HOOKS_GOVERNOR=1 gd "" "$gh_home")" = False ]'
 rm -rf "$gh_home"
-eg=$(mktemp -d -p "$PWD/test"); trap "kill \$STUB 2>/dev/null; rm -rf $eg" EXIT; printf 'x' > "$eg/f.txt"; git -C "$eg" init -q; git -C "$eg" add f.txt; git -C "$eg" -c user.email=a@b -c user.name=n commit -qm i; printf 'y' > "$eg/f.txt"
+# This trap REPLACES the one set with $EG above, so it must remove both: until it
+# did, every run left a .egtest.* git repo behind, and `git add -A` swept four of
+# them into a commit (2026-10-23).
+eg=$(mktemp -d -p "$PWD/test"); trap "kill \$STUB 2>/dev/null; rm -rf $eg \"\$EG\"" EXIT; printf 'x' > "$eg/f.txt"; git -C "$eg" init -q; git -C "$eg" add f.txt; git -C "$eg" -c user.email=a@b -c user.name=n commit -qm i; printf 'y' > "$eg/f.txt"
 out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}' | ENFORCER_GOVERNOR=1 python3 hooks/bash_risk_gate.py)
 check "bash gate: emits a note, never permissionDecision (governor present)" 'echo "$out" | grep -q additionalContext && ! echo "$out" | grep -q permissionDecision'
 out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}' | python3 hooks/bash_risk_gate.py)

@@ -152,6 +152,21 @@ def prune(dirpath, days=14):
         pass
 
 
+# The log grew about 3 MB a day on one busy machine (60 MB, 225k lines, in
+# three weeks - 2026-10-23) and nothing trimmed it. At the cap the file is moved
+# to `.1` and a fresh one started: one previous generation is history enough for
+# stats.py, which reads the current file, and both stay local.
+LOG_MAX_BYTES = int(os.environ.get("JEV_HOOKS_LOG_MAX_BYTES") or 64 * 1024 * 1024)
+
+
+def _rotate():
+    try:
+        if os.path.getsize(LOG) >= LOG_MAX_BYTES:
+            os.replace(LOG, LOG + ".1")
+    except Exception:
+        pass
+
+
 def record(hook, decision, answers=None, note=None, **extra):
     """Append what a hook DECIDED, next to what the call cost.
 
@@ -178,6 +193,7 @@ def record(hook, decision, answers=None, note=None, **extra):
         rec["note"] = note[:300]
     rec.update({k: v for k, v in extra.items() if v is not None})
     try:
+        _rotate()
         with open(LOG, "a") as f:
             f.write(json.dumps(rec) + "\n")
     except Exception:
@@ -188,6 +204,7 @@ def _log(nbytes, usage, secs, outcome):
     if not LOG:
         return
     try:
+        _rotate()
         with open(LOG, "a") as f:
             f.write(json.dumps({"t": time.time(), "kind": "call", "bytes": nbytes, "usage": usage, "secs": round(secs, 3), "outcome": outcome}) + "\n")
     except Exception:

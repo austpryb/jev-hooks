@@ -125,18 +125,46 @@ def last_prompt_and_results(path):
             transcript.tool_results(path, chars=RESULTS_CHARS, after=at), ran, replies)
 
 
+# A list marker on its own: "4." or "-" or "##". Splitting on ". " made the
+# number of a markdown list item its own "sentence", and the unverified check
+# quoted "4." as the unsupported claim (2026-10-23) - the judge had objected to a
+# real sentence elsewhere, but the block showed the user a number, and a block
+# whose quote is nonsense reads as a broken hook even when the verdict is right.
+MARKER = r"(?:\d{1,3}[.)]|[-*•]|#{1,6})"
+ALONE = re.compile(rf"^{MARKER}$")
+TRAILING = re.compile(rf"(?:^|\s){MARKER}$")          # "Next: 1." - the item follows
+ANY_MARKER = re.compile(rf"(?:^|(?<=\s)){MARKER}(?=\s|$)")
+
+
+def sentences(message):
+    """The message as sentences a judge could have objected to: a list marker is
+    glued back onto the item it numbers, and never stands alone."""
+    parts = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", message) if s.strip()]
+    out = []
+    for p in parts:
+        if out and TRAILING.search(out[-1]):
+            out[-1] = out[-1] + " " + p
+        else:
+            out.append(p)
+    return [s for s in out if not ALONE.match(s)]
+
+
 def sentence_for(check, message):
-    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", message) if s.strip()]
+    sents = sentences(message)
     if not sents:
         return ""
+    # Judged on the item's own words: the "2" in "2. Tag it." is a marker, not a
+    # number the message claims.
+    body = lambda s: ANY_MARKER.sub("", s)
     if check == "promise":
         for s in reversed(sents):
-            if re.search(r"\b(I'?ll|I will|next I|let me know|once you|when you|after that I)\b", s, re.I):
+            if re.search(r"\b(I'?ll|I will|next I|let me know|once you|when you|after that I)\b", body(s), re.I):
                 return s
         return sents[-1]
     if check == "unverified":
         for s in reversed(sents):
-            if re.search(r"\d|pass|fail|green|succeed|works|verified", s, re.I):
+            # Whole words: "unverified" is not a claim of verification.
+            if re.search(r"\d|\b(?:pass(?:es|ed|ing)?|fail(?:s|ed|ing)?|green|succeed(?:s|ed)?|works|verified)\b", body(s), re.I):
                 return s
     return sents[-1]
 
